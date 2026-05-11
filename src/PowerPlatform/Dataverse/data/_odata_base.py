@@ -13,6 +13,7 @@ import json
 import re
 import unicodedata
 import uuid
+import warnings
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -26,6 +27,8 @@ from ..core.errors import ValidationError
 from ..core._error_codes import (
     VALIDATION_UNSUPPORTED_COLUMN_TYPE,
     VALIDATION_UNSUPPORTED_CACHE_KIND,
+    VALIDATION_SQL_WRITE_BLOCKED,
+    VALIDATION_SQL_UNSUPPORTED_SYNTAX,
 )
 from ..models.relationship import (
     LookupAttributeMetadata,
@@ -654,7 +657,17 @@ class _ODataBase:
         Returns ``(LookupAttributeMetadata, OneToManyRelationshipMetadata)``.
         Used by both the batch resolver and ``TableOperations.create_lookup_field``
         to avoid duplicating the metadata assembly logic.
+
+        Note: ``referencing_table`` and ``referenced_table`` are lowercased
+        automatically because Dataverse stores entity logical names in
+        lowercase.  ``lookup_field_name`` is kept as-is (it is a SchemaName).
         """
+        # Dataverse logical names are always lowercase.  Callers may pass
+        # SchemaName-cased values (e.g. "new_SQLTeam"); normalise here so
+        # the relationship metadata uses valid logical names.
+        referencing_lower = referencing_table.lower()
+        referenced_lower = referenced_table.lower()
+
         lookup = LookupAttributeMetadata(
             schema_name=lookup_field_name,
             display_name=Label(
@@ -671,12 +684,12 @@ class _ODataBase:
             lookup.description = Label(
                 localized_labels=[LocalizedLabel(label=description, language_code=language_code)]
             )
-        rel_name = f"{referenced_table}_{referencing_table}_{lookup_field_name}"
+        rel_name = f"{referenced_lower}_{referencing_lower}_{lookup_field_name}"
         relationship = OneToManyRelationshipMetadata(
             schema_name=rel_name,
-            referenced_entity=referenced_table,
-            referencing_entity=referencing_table,
-            referenced_attribute=f"{referenced_table}id",
+            referenced_entity=referenced_lower,
+            referencing_entity=referencing_lower,
+            referenced_attribute=f"{referenced_lower}id",
             cascade_configuration=CascadeConfiguration(delete=cascade_delete),
         )
         return lookup, relationship

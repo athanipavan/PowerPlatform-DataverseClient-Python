@@ -18,6 +18,7 @@ from ...data._batch_base import (
     _RecordUpdate,
     _RecordDelete,
     _RecordGet,
+    _RecordList,
     _RecordUpsert,
     _TableCreate,
     _TableDelete,
@@ -180,6 +181,8 @@ class _AsyncBatchClient(_BatchBase):
             return await self._resolve_record_delete(item)
         if isinstance(item, _RecordGet):
             return await self._resolve_record_get(item)
+        if isinstance(item, _RecordList):
+            return await self._resolve_record_list(item)
         if isinstance(item, _RecordUpsert):
             return await self._resolve_record_upsert(item)
         if isinstance(item, _TableCreate):
@@ -253,7 +256,30 @@ class _AsyncBatchClient(_BatchBase):
         return requests
 
     async def _resolve_record_get(self, op: _RecordGet) -> List[_RawRequest]:
-        return [await self._od._build_get(op.table, op.record_id, select=op.select)]
+        return [
+            await self._od._build_get(
+                op.table,
+                op.record_id,
+                select=op.select,
+                expand=op.expand,
+                include_annotations=op.include_annotations,
+            )
+        ]
+
+    async def _resolve_record_list(self, op: _RecordList) -> List[_RawRequest]:
+        return [
+            await self._od._build_list(
+                op.table,
+                select=op.select,
+                filter=op.filter,
+                orderby=op.orderby,
+                top=op.top,
+                expand=op.expand,
+                page_size=op.page_size,
+                count=op.count,
+                include_annotations=op.include_annotations,
+            )
+        ]
 
     async def _resolve_record_upsert(self, op: _RecordUpsert) -> List[_RawRequest]:
         entity_set = await self._od._entity_set_from_schema_name(op.table)

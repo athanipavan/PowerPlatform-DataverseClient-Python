@@ -5,9 +5,10 @@
 
 from __future__ import annotations
 
-from typing import Any, AsyncIterator, Dict, List, Optional, Union, overload, TYPE_CHECKING
+from typing import Any, AsyncIterator, Dict, Iterator, List, Optional, Union, overload, TYPE_CHECKING
 
-from ...models.record import Record
+from ...core.errors import HttpError
+from ...models.record import QueryResult, Record
 from ...models.upsert import UpsertItem
 
 if TYPE_CHECKING:
@@ -462,6 +463,200 @@ class AsyncRecordOperations:
                     yield [Record.from_api_response(table, row) for row in page]
 
         return _paged()
+
+    # --------------------------------------------------------------- retrieve
+
+    async def retrieve(
+        self,
+        table: str,
+        record_id: str,
+        *,
+        select: Optional[List[str]] = None,
+        expand: Optional[List[str]] = None,
+        include_annotations: Optional[str] = None,
+    ) -> Optional[Record]:
+        """Fetch a single record by its GUID, returning ``None`` if not found.
+
+        GA replacement for ``records.get(table, record_id)``. Returns ``None``
+        instead of raising when the record does not exist (HTTP 404).
+
+        :param table: Schema name of the table (e.g. ``"account"``).
+        :type table: :class:`str`
+        :param record_id: GUID of the record to retrieve.
+        :type record_id: :class:`str`
+        :param select: Optional list of column logical names to include.
+        :type select: list[str] or None
+        :param expand: Optional list of navigation properties to expand (e.g.
+            ``["primarycontactid"]``). Navigation property names are
+            case-sensitive and must match the entity's ``$metadata``.
+        :type expand: list[str] or None
+        :param include_annotations: OData annotation pattern for the
+            ``Prefer: odata.include-annotations`` header (e.g. ``"*"`` or
+            ``"OData.Community.Display.V1.FormattedValue"``), or ``None``.
+        :type include_annotations: :class:`str` or None
+        :return: Typed record, or ``None`` if not found.
+        :rtype: :class:`~PowerPlatform.Dataverse.models.record.Record` or None
+
+        Example::
+
+            record = await client.records.retrieve(
+                "account", account_id,
+                select=["name", "statuscode"],
+                expand=["primarycontactid"],
+                include_annotations="OData.Community.Display.V1.FormattedValue",
+            )
+            if record is not None:
+                contact = record.get("primarycontactid") or {}
+                print(contact.get("fullname"))
+        """
+        async with self._client._scoped_odata() as od:
+            try:
+                raw = await od._get(table, record_id, select=select, expand=expand, include_annotations=include_annotations)
+            except HttpError as exc:
+                if exc.status_code == 404:
+                    return None
+                raise
+            return Record.from_api_response(table, raw, record_id=record_id)
+
+    # -------------------------------------------------------------------- list
+
+    async def list(
+        self,
+        table: str,
+        *,
+        filter: Optional[Union[str, Any]] = None,
+        select: Optional[List[str]] = None,
+        orderby: Optional[List[str]] = None,
+        top: Optional[int] = None,
+        expand: Optional[List[str]] = None,
+        page_size: Optional[int] = None,
+        count: bool = False,
+        include_annotations: Optional[str] = None,
+    ) -> QueryResult:
+        """Fetch multiple records and return them as a :class:`QueryResult`.
+
+        GA replacement for ``records.get(table, filter=...)``. All pages are
+        collected eagerly and returned as a single :class:`QueryResult`.
+
+        :param table: Schema name of the table (e.g. ``"account"``).
+        :type table: :class:`str`
+        :param filter: Optional OData filter string or :class:`FilterExpression`.
+        :type filter: str or FilterExpression or None
+        :param select: Optional list of column logical names to include.
+        :type select: list[str] or None
+        :param orderby: Optional list of sort expressions (e.g. ``["name asc", "createdon desc"]``).
+        :type orderby: list[str] or None
+        :param top: Maximum total number of records to return.
+        :type top: int or None
+        :param expand: Optional list of navigation properties to expand.
+        :type expand: list[str] or None
+        :param page_size: Per-page size hint via ``Prefer: odata.maxpagesize``.
+        :type page_size: int or None
+        :param count: If ``True``, adds ``$count=true`` to include a total record count.
+        :type count: bool
+        :param include_annotations: OData annotation pattern for the
+            ``Prefer: odata.include-annotations`` header, or ``None``.
+        :type include_annotations: :class:`str` or None
+        :return: All matching records collected into a :class:`QueryResult`.
+        :rtype: :class:`~PowerPlatform.Dataverse.models.record.QueryResult`
+
+        Example::
+
+            result = await client.records.list(
+                "account",
+                filter="statecode eq 0",
+                select=["name", "statuscode"],
+                orderby=["name asc"],
+                top=100,
+                include_annotations="OData.Community.Display.V1.FormattedValue",
+            )
+            for record in result:
+                print(record["name"])
+        """
+        filter_str: Optional[str] = str(filter) if filter is not None else None
+        all_records: List[Record] = []
+        async with self._client._scoped_odata() as od:
+            async for page in od._get_multiple(
+                table,
+                select=select,
+                filter=filter_str,
+                orderby=orderby,
+                top=top,
+                expand=expand,
+                page_size=page_size,
+                count=count,
+                include_annotations=include_annotations,
+            ):
+                all_records.extend(Record.from_api_response(table, row) for row in page)
+        return QueryResult(all_records)
+
+    # --------------------------------------------------------------- list_pages
+
+    async def list_pages(
+        self,
+        table: str,
+        *,
+        filter: Optional[Union[str, Any]] = None,
+        select: Optional[List[str]] = None,
+        orderby: Optional[List[str]] = None,
+        top: Optional[int] = None,
+        expand: Optional[List[str]] = None,
+        page_size: Optional[int] = None,
+        count: bool = False,
+        include_annotations: Optional[str] = None,
+    ) -> AsyncIterator[QueryResult]:
+        """Lazily yield one :class:`QueryResult` per HTTP page.
+
+        Streaming counterpart to :meth:`list`. Each iteration triggers one
+        network request via ``@odata.nextLink``. One-shot — do not iterate
+        more than once.
+
+        :param table: Schema name of the table (e.g. ``"account"``).
+        :type table: :class:`str`
+        :param filter: Optional OData filter string or :class:`FilterExpression`.
+        :type filter: str or FilterExpression or None
+        :param select: Optional list of column logical names to include.
+        :type select: list[str] or None
+        :param orderby: Optional list of sort expressions.
+        :type orderby: list[str] or None
+        :param top: Maximum total number of records to return.
+        :type top: int or None
+        :param expand: Optional list of navigation properties to expand.
+        :type expand: list[str] or None
+        :param page_size: Per-page size hint via ``Prefer: odata.maxpagesize``.
+        :type page_size: int or None
+        :param count: If ``True``, adds ``$count=true`` to include a total record count.
+        :type count: bool
+        :param include_annotations: OData annotation pattern for the
+            ``Prefer: odata.include-annotations`` header, or ``None``.
+        :type include_annotations: :class:`str` or None
+        :return: Async iterator of per-page :class:`QueryResult` objects.
+        :rtype: AsyncIterator[:class:`~PowerPlatform.Dataverse.models.record.QueryResult`]
+
+        Example::
+
+            async for page in client.records.list_pages(
+                "account",
+                filter="statecode eq 0",
+                orderby=["name asc"],
+                page_size=200,
+            ):
+                process(page.to_dataframe())
+        """
+        filter_str: Optional[str] = str(filter) if filter is not None else None
+        async with self._client._scoped_odata() as od:
+            async for page in od._get_multiple(
+                table,
+                select=select,
+                filter=filter_str,
+                orderby=orderby,
+                top=top,
+                expand=expand,
+                page_size=page_size,
+                count=count,
+                include_annotations=include_annotations,
+            ):
+                yield QueryResult([Record.from_api_response(table, row) for row in page])
 
     # ------------------------------------------------------------------ upsert
 

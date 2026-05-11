@@ -268,7 +268,7 @@ class TestResolveRecordGet:
         op = _RecordGet(table="account", record_id="guid-1", select=["name"])
         result = await client._resolve_record_get(op)
         assert len(result) == 1
-        od._build_get.assert_called_once_with("account", "guid-1", select=["name"])
+        od._build_get.assert_called_once_with("account", "guid-1", select=["name"], expand=None, include_annotations=None)
 
 
 # ---------------------------------------------------------------------------

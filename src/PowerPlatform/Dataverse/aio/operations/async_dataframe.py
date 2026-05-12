@@ -33,8 +33,10 @@ class AsyncDataFrameOperations:
 
         async with AsyncDataverseClient(base_url, credential) as client:
 
-            # Query records as a DataFrame
-            df = await client.dataframe.get("account", select=["name"], top=100)
+            # Query records as a DataFrame via SQL
+            df = await client.dataframe.sql(
+                "SELECT TOP 100 name FROM account WHERE statecode = 0"
+            )
 
             # Create records from a DataFrame
             new_df = pd.DataFrame([{"name": "Contoso"}, {"name": "Fabrikam"}])
@@ -78,109 +80,20 @@ class AsyncDataFrameOperations:
                 )
                 print(f"Got {len(df)} rows")
                 print(df.head())
+
+            Aggregate query to DataFrame::
+
+                df = await client.dataframe.sql(
+                    "SELECT a.name, COUNT(c.contactid) as cnt "
+                    "FROM account a "
+                    "JOIN contact c ON a.accountid = c.parentcustomerid "
+                    "GROUP BY a.name"
+                )
         """
         rows = await self._client.query.sql(sql)
         if not rows:
             return pd.DataFrame()
         return pd.DataFrame.from_records([r.data for r in rows])
-
-    # -------------------------------------------------------------------- get
-
-    async def get(
-        self,
-        table: str,
-        record_id: Optional[str] = None,
-        select: Optional[List[str]] = None,
-        filter: Optional[str] = None,
-        orderby: Optional[List[str]] = None,
-        top: Optional[int] = None,
-        expand: Optional[List[str]] = None,
-        page_size: Optional[int] = None,
-        count: bool = False,
-        include_annotations: Optional[str] = None,
-    ) -> pd.DataFrame:
-        """Fetch records and return as a single pandas DataFrame.
-
-        When ``record_id`` is provided, returns a single-row DataFrame.
-        When ``record_id`` is None, internally iterates all pages and returns one
-        consolidated DataFrame.
-
-        :param table: Schema name of the table (e.g. ``"account"`` or ``"new_MyTestTable"``).
-        :type table: :class:`str`
-        :param record_id: Optional GUID to fetch a specific record. If None, queries multiple records.
-        :type record_id: :class:`str` or None
-        :param select: Optional list of attribute logical names to retrieve.
-        :type select: list[str] or None
-        :param filter: Optional OData filter string. Column names must use exact lowercase logical names.
-        :type filter: :class:`str` or None
-        :param orderby: Optional list of attributes to sort by.
-        :type orderby: list[str] or None
-        :param top: Optional maximum number of records to return.
-        :type top: :class:`int` or None
-        :param expand: Optional list of navigation properties to expand (case-sensitive).
-        :type expand: list[str] or None
-        :param page_size: Optional number of records per page for pagination.
-        :type page_size: :class:`int` or None
-        :param count: If ``True``, adds ``$count=true`` to include a total
-            record count in the response.
-        :type count: :class:`bool`
-        :param include_annotations: OData annotation pattern for the
-            ``Prefer: odata.include-annotations`` header (e.g. ``"*"`` or
-            ``"OData.Community.Display.V1.FormattedValue"``), or ``None``.
-        :type include_annotations: :class:`str` or None
-
-        :return: DataFrame containing all matching records. Returns an empty DataFrame
-            when no records match.
-        :rtype: ~pandas.DataFrame
-
-        :raises ValueError: If ``record_id`` is not a non-empty string, or if
-            query parameters (``filter``, ``orderby``, ``top``, ``expand``,
-            ``page_size``) are provided alongside ``record_id``.
-
-        Example:
-            Fetch a single record as a DataFrame::
-
-                df = await client.dataframe.get("account", record_id=account_id, select=["name"])
-                print(df)
-
-            Query with filtering::
-
-                df = await client.dataframe.get("account", filter="statecode eq 0", select=["name"])
-                print(f"Got {len(df)} active accounts")
-        """
-        if record_id is not None:
-            if not isinstance(record_id, str) or not record_id.strip():
-                raise ValueError("record_id must be a non-empty string")
-            record_id = record_id.strip()
-            if any(p is not None for p in (filter, orderby, top, expand, page_size)):
-                raise ValueError(
-                    "Cannot specify query parameters (filter, orderby, top, "
-                    "expand, page_size) when fetching a single record by ID"
-                )
-            result = await self._client.records.get(
-                table,
-                record_id,
-                select=select,
-            )
-            return pd.DataFrame([result.data])
-
-        rows: List[dict] = []
-        async for batch in await self._client.records.get(
-            table,
-            select=select,
-            filter=filter,
-            orderby=orderby,
-            top=top,
-            expand=expand,
-            page_size=page_size,
-            count=count,
-            include_annotations=include_annotations,
-        ):
-            rows.extend(row.data for row in batch)
-
-        if not rows:
-            return pd.DataFrame(columns=select) if select else pd.DataFrame()
-        return pd.DataFrame.from_records(rows)
 
     # ----------------------------------------------------------------- create
 
@@ -202,6 +115,11 @@ class AsyncDataFrameOperations:
         :raises TypeError: If ``records`` is not a pandas DataFrame.
         :raises ValueError: If ``records`` is empty or the number of returned
             IDs does not match the number of input rows.
+
+        .. tip::
+            All rows are sent in a single ``CreateMultiple`` request. For very
+            large DataFrames, consider splitting into smaller batches to avoid
+            request timeouts.
 
         Example:
             Create records from a DataFrame::
@@ -259,12 +177,24 @@ class AsyncDataFrameOperations:
         :type id_column: :class:`str`
         :param clear_nulls: When ``False`` (default), missing values (NaN/None) are skipped
             (the field is left unchanged on the server). When ``True``, missing values are sent
-            as ``null`` to Dataverse, clearing the field.
+            as ``null`` to Dataverse, clearing the field. Use ``True`` only when you intentionally
+            want NaN/None values to clear fields.
         :type clear_nulls: :class:`bool`
 
         :raises TypeError: If ``changes`` is not a pandas DataFrame.
         :raises ValueError: If ``changes`` is empty, ``id_column`` is not found in the
-            DataFrame, ``id_column`` contains invalid values, or no updatable columns exist.
+            DataFrame, ``id_column`` contains invalid (non-string, empty, or whitespace-only)
+            values, or no updatable columns exist besides ``id_column``.
+            When ``clear_nulls`` is ``False`` (default), rows where all change values
+            are NaN/None produce empty patches and are silently skipped. If all rows
+            are skipped, the method returns without making an API call. When
+            ``clear_nulls`` is ``True``, NaN/None values become explicit nulls, so
+            rows are never skipped.
+
+        .. tip::
+            All rows are sent in a single ``UpdateMultiple`` request (or a
+            single PATCH for one row). For very large DataFrames, consider
+            splitting into smaller batches to avoid request timeouts.
 
         Example:
             Update records with different values per row::
@@ -276,6 +206,17 @@ class AsyncDataFrameOperations:
                     {"accountid": "guid-2", "telephone1": "555-0200"},
                 ])
                 await client.dataframe.update("account", df, id_column="accountid")
+
+            Broadcast the same change to all records::
+
+                df = pd.DataFrame({"accountid": ["guid-1", "guid-2", "guid-3"]})
+                df["websiteurl"] = "https://example.com"
+                await client.dataframe.update("account", df, id_column="accountid")
+
+            Clear a field by setting clear_nulls=True::
+
+                df = pd.DataFrame([{"accountid": "guid-1", "websiteurl": None}])
+                await client.dataframe.update("account", df, id_column="accountid", clear_nulls=True)
         """
         if not isinstance(changes, pd.DataFrame):
             raise TypeError("changes must be a pandas DataFrame")
@@ -332,7 +273,8 @@ class AsyncDataFrameOperations:
         :type use_bulk_delete: :class:`bool`
 
         :raises TypeError: If ``ids`` is not a pandas Series.
-        :raises ValueError: If ``ids`` contains invalid values.
+        :raises ValueError: If ``ids`` contains invalid (non-string, empty, or
+            whitespace-only) values.
 
         :return: BulkDelete job ID when deleting multiple records via BulkDelete;
             ``None`` when deleting a single record, using sequential deletion, or

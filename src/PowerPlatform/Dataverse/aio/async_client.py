@@ -71,10 +71,10 @@ class AsyncDataverseClient:
     Example:
         **Recommended -- async context manager** (enables HTTP connection pooling)::
 
-            from azure.identity.aio import DefaultAzureCredential
+            from azure.identity.aio import InteractiveBrowserCredential
             from PowerPlatform.Dataverse.aio.async_client import AsyncDataverseClient
 
-            credential = DefaultAzureCredential()
+            credential = InteractiveBrowserCredential()
 
             async with AsyncDataverseClient("https://org.crm.dynamics.com", credential) as client:
                 record_id = await client.records.create("account", {"name": "Contoso Ltd"})
@@ -118,12 +118,17 @@ class AsyncDataverseClient:
         Get or create the internal async OData client instance.
 
         This method implements lazy initialization of the low-level async OData
-        client, deferring construction until the first API call.
+        client, deferring construction until the first API call. When used outside
+        of an ``async with`` block, a :class:`aiohttp.ClientSession` is created
+        lazily here so that standalone usage (without a context manager) works
+        without requiring the caller to manage the session explicitly.
 
         :return: The lazily-initialized low-level async client.
         :rtype: ~PowerPlatform.Dataverse.aio.data._async_odata._AsyncODataClient
         """
         if self._odata is None:
+            if self._session is None:
+                self._session = aiohttp.ClientSession()
             self._odata = _AsyncODataClient(
                 self.auth,
                 self._base_url,
@@ -199,3 +204,32 @@ class AsyncDataverseClient:
         """Raise :class:`RuntimeError` if the client has been closed."""
         if self._closed:
             raise RuntimeError("AsyncDataverseClient is closed")
+
+    # ---------------- Cache utilities ----------------
+
+    async def flush_cache(self, kind: str) -> int:
+        """
+        Flush cached client metadata or state.
+
+        :param kind: Cache kind to flush. Currently supported values:
+
+            - ``"picklist"``: Clears picklist label cache used for label-to-integer conversion
+
+            Future kinds (e.g. ``"entityset"``, ``"primaryid"``) may be added without
+            breaking this signature.
+        :type kind: :class:`str`
+
+        :return: Number of cache entries removed.
+        :rtype: :class:`int`
+
+        Example:
+            Clear the picklist cache::
+
+                removed = await client.flush_cache("picklist")
+                print(f"Cleared {removed} cached picklist entries")
+        """
+        async with self._scoped_odata() as od:
+            return od._flush_cache(kind)
+
+
+__all__ = ["AsyncDataverseClient"]

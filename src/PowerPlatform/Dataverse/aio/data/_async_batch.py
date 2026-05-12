@@ -5,8 +5,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Union
 
 from ...core.errors import MetadataError, ValidationError
 from ...core._error_codes import METADATA_TABLE_NOT_FOUND, METADATA_COLUMN_NOT_FOUND
@@ -250,10 +251,7 @@ class _AsyncBatchClient(_BatchBase):
             return []
         if op.use_bulk_delete:
             return [await self._od._build_delete_multiple(op.table, ids)]
-        requests: List[_RawRequest] = []
-        for rid in ids:
-            requests.append(await self._od._build_delete(op.table, rid))
-        return requests
+        return list(await asyncio.gather(*[self._od._build_delete(op.table, rid) for rid in ids]))
 
     async def _resolve_record_get(self, op: _RecordGet) -> List[_RawRequest]:
         return [
@@ -317,11 +315,12 @@ class _AsyncBatchClient(_BatchBase):
     async def _resolve_table_remove_columns(self, op: _TableRemoveColumns) -> List[_RawRequest]:
         columns = [op.columns] if isinstance(op.columns, str) else list(op.columns)
         metadata_id = await self._require_entity_metadata(op.table)
+        attr_metas = await asyncio.gather(*[
+            self._od._get_attribute_metadata(metadata_id, col_name, extra_select="@odata.type,AttributeType")
+            for col_name in columns
+        ])
         requests: List[_RawRequest] = []
-        for col_name in columns:
-            attr_meta = await self._od._get_attribute_metadata(
-                metadata_id, col_name, extra_select="@odata.type,AttributeType"
-            )
+        for col_name, attr_meta in zip(columns, attr_metas):
             if not attr_meta or not attr_meta.get("MetadataId"):
                 raise MetadataError(
                     f"Column '{col_name}' not found on table '{op.table}'.",

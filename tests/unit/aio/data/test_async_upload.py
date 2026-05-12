@@ -131,7 +131,10 @@ class TestUploadFileSmall:
             f.write(b"x")
             path = f.name
         try:
-            with patch("os.path.getsize", return_value=200 * 1024 * 1024):
+            stat_result = MagicMock()
+            stat_result.st_size = 200 * 1024 * 1024
+            stat_result.st_mode = 0o100644  # regular file
+            with patch("pathlib.Path.stat", return_value=stat_result):
                 with pytest.raises(ValueError, match="exceeds single-upload limit"):
                     await client._upload_file_small("accounts", "guid-1", "new_doc", path)
         finally:

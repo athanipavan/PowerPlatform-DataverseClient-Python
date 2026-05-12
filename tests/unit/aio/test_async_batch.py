@@ -130,7 +130,8 @@ class TestAsyncBatchRecordOperations:
 
     def test_get_appends_record_get(self, async_client):
         batch = _make_batch(async_client)
-        batch.records.get("account", "guid-1", select=["name"])
+        with pytest.warns(DeprecationWarning):
+            batch.records.get("account", "guid-1", select=["name"])
         assert len(batch._items) == 1
         item = batch._items[0]
         assert isinstance(item, _RecordGet)
@@ -506,7 +507,8 @@ class TestAsyncBatchMultipleOperations:
     def test_multiple_items_accumulated(self, async_client):
         batch = _make_batch(async_client)
         batch.records.create("account", {"name": "A"})
-        batch.records.get("account", "guid-1")
+        with pytest.warns(DeprecationWarning):
+            batch.records.get("account", "guid-1")
         batch.tables.get("account")
         batch.query.sql("SELECT name FROM account")
         assert len(batch._items) == 4

@@ -350,6 +350,9 @@ class AsyncTableOperations:
                     LocalizedLabel,
                     CascadeConfiguration,
                 )
+                from PowerPlatform.Dataverse.common.constants import (
+                    CASCADE_BEHAVIOR_REMOVE_LINK,
+                )
 
                 lookup = LookupAttributeMetadata(
                     schema_name="new_DepartmentId",
@@ -365,6 +368,9 @@ class AsyncTableOperations:
                     referenced_entity="new_department",
                     referencing_entity="new_employee",
                     referenced_attribute="new_departmentid",
+                    cascade_configuration=CascadeConfiguration(
+                        delete=CASCADE_BEHAVIOR_REMOVE_LINK,
+                    ),
                 )
 
                 result = await client.tables.create_one_to_many_relationship(lookup, relationship)
@@ -553,6 +559,7 @@ class AsyncTableOperations:
                     referenced_table="account",
                     display_name="Account",
                     required=True,
+                    cascade_delete=CASCADE_BEHAVIOR_REMOVE_LINK,
                 )
                 print(f"Created lookup: {result['lookup_schema_name']}")
         """
@@ -726,6 +733,12 @@ class AsyncTableOperations:
             for col in columns:
                 print(f"{col['LogicalName']} ({col.get('AttributeType')})")
 
+            # List only specific properties
+            columns = await client.tables.list_columns(
+                "account",
+                select=["LogicalName", "SchemaName", "AttributeType"],
+            )
+
             # Filter to only string attributes
             columns = await client.tables.list_columns(
                 "account",
@@ -765,6 +778,16 @@ class AsyncTableOperations:
             rels = await client.tables.list_relationships()
             for rel in rels:
                 print(f"{rel['SchemaName']} ({rel.get('@odata.type')})")
+
+            # Filter by type
+            one_to_many = await client.tables.list_relationships(
+                filter="RelationshipType eq Microsoft.Dynamics.CRM.RelationshipType'OneToManyRelationship'"
+            )
+
+            # Select specific properties
+            rels = await client.tables.list_relationships(
+                select=["SchemaName", "ReferencedEntity", "ReferencingEntity"]
+            )
         """
         async with self._client._scoped_odata() as od:
             return await od._list_relationships(filter=filter, select=select)

@@ -5,7 +5,10 @@
 
 from __future__ import annotations
 
+import asyncio
+from pathlib import Path
 from typing import Optional
+from urllib.parse import quote
 
 
 class _AsyncFileUploadMixin:
@@ -40,8 +43,6 @@ class _AsyncFileUploadMixin:
         if_none_match : :class:`bool`
             When True (default) only succeeds if column empty. When False overwrites (If-Match: *).
         """
-        import os
-
         # Resolve entity set from table schema name
         entity_set = await self._entity_set_from_schema_name(table_schema_name)
 
@@ -61,9 +62,10 @@ class _AsyncFileUploadMixin:
         mode = (mode or "auto").lower()
 
         if mode == "auto":
-            if not os.path.isfile(path):
+            p = Path(path)
+            if not p.is_file():
                 raise FileNotFoundError(f"File not found: {path}")
-            size = os.path.getsize(path)
+            size = p.stat().st_size
             mode = "small" if size < 128 * 1024 * 1024 else "chunk"
 
         # Convert schema name to lowercase logical name for URL usage
@@ -87,19 +89,17 @@ class _AsyncFileUploadMixin:
         if_none_match: bool = True,
     ) -> None:
         """Upload a file (<128MB) via single PATCH."""
-        import os
-
         if not record_id:
             raise ValueError("record_id required")
-        if not os.path.isfile(path):
+        p = Path(path)
+        if not p.is_file():
             raise FileNotFoundError(f"File not found: {path}")
-        size = os.path.getsize(path)
+        size = p.stat().st_size
         limit = 128 * 1024 * 1024
         if size > limit:
             raise ValueError(f"File size {size} exceeds single-upload limit {limit}; use chunk mode.")
-        with open(path, "rb") as fh:
-            data = fh.read()
-        fname = os.path.basename(path)
+        data = await asyncio.to_thread(p.read_bytes)
+        fname = p.name
         key = self._format_key(record_id)
         url = f"{self.api}/{entity_set}{key}/{file_name_attribute}"
         headers = {
@@ -112,7 +112,6 @@ class _AsyncFileUploadMixin:
             headers["If-Match"] = "*"
         # Single PATCH upload; allow default success codes (includes 204)
         await self._request("patch", url, headers=headers, data=data)
-        return None
 
     async def _upload_file_chunk(
         self,
@@ -139,20 +138,19 @@ class _AsyncFileUploadMixin:
         if_none_match : :class:`bool`
             When True sends ``If-None-Match: null`` to only succeed if the column is currently empty.
             Set False to always overwrite (uses ``If-Match: *``).
+
         Returns
         -------
         None
             Returns nothing on success. Any failure raises an exception.
         """
-        import os, math
-        from urllib.parse import quote
-
         if not record_id:
             raise ValueError("record_id required")
-        if not os.path.isfile(path):
+        p = Path(path)
+        if not p.is_file():
             raise FileNotFoundError(f"File not found: {path}")
-        total_size = os.path.getsize(path)
-        fname = os.path.basename(path)
+        total_size = p.stat().st_size
+        fname = p.name
         key = self._format_key(record_id)
         init_url = f"{self.api}/{entity_set}{key}/{file_name_attribute}?x-ms-file-name={quote(fname)}"
         headers = {
@@ -174,11 +172,11 @@ class _AsyncFileUploadMixin:
         effective_size = recommended_size or (4 * 1024 * 1024)
         if effective_size <= 0:
             raise ValueError("effective chunk size must be positive")
-        total_chunks = int(math.ceil(total_size / effective_size)) if total_size else 1
+        total_chunks = (total_size + effective_size - 1) // effective_size if total_size else 1
         uploaded_bytes = 0
-        with open(path, "rb") as fh:
-            for idx in range(total_chunks):
-                chunk = fh.read(effective_size)
+        with p.open("rb") as fh:
+            for _ in range(total_chunks):
+                chunk = await asyncio.to_thread(fh.read, effective_size)
                 if not chunk:
                     break
                 start = uploaded_bytes
@@ -192,4 +190,3 @@ class _AsyncFileUploadMixin:
                 # Each chunk returns 206 (partial) or 204 (final). Accept both.
                 await self._request("patch", location, headers=c_headers, data=chunk, expected=(206, 204))
                 uploaded_bytes += len(chunk)
-        return None

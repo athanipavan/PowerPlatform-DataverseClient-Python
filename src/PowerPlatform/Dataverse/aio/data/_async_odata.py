@@ -367,11 +367,13 @@ class _AsyncODataClient(_AsyncFileUploadMixin, _AsyncRelationshipOperationsMixin
                 f"alternate_keys and records must have the same length " f"({len(alternate_keys)} != {len(records)})"
             )
         logical_name = table_schema_name.lower()
+        lowered_records = [self._lowercase_keys(r) for r in records]
+        converted = await asyncio.gather(*[
+            self._convert_labels_to_ints(table_schema_name, r) for r in lowered_records
+        ])
         targets: List[Dict[str, Any]] = []
-        for alt_key, record in zip(alternate_keys, records):
+        for alt_key, record_processed in zip(alternate_keys, converted):
             alt_key_lower = self._lowercase_keys(alt_key)
-            record_processed = self._lowercase_keys(record)
-            record_processed = await self._convert_labels_to_ints(table_schema_name, record_processed)
             conflicting = {
                 k for k in set(alt_key_lower) & set(record_processed) if alt_key_lower[k] != record_processed[k]
             }
@@ -429,7 +431,7 @@ class _AsyncODataClient(_AsyncFileUploadMixin, _AsyncRelationshipOperationsMixin
         if isinstance(changes, dict):
             batch = [{pk_attr: rid, **changes} for rid in ids]
             await self._update_multiple(entity_set, table_schema_name, batch)
-            return None
+            return
         if not isinstance(changes, list):
             raise TypeError("changes must be dict or list[dict]")
         if len(changes) != len(ids):
@@ -440,7 +442,6 @@ class _AsyncODataClient(_AsyncFileUploadMixin, _AsyncRelationshipOperationsMixin
                 raise TypeError("Each patch must be a dict")
             batch.append({pk_attr: rid, **patch})
         await self._update_multiple(entity_set, table_schema_name, batch)
-        return None
 
     async def _delete_multiple(
         self,
@@ -513,7 +514,6 @@ class _AsyncODataClient(_AsyncFileUploadMixin, _AsyncRelationshipOperationsMixin
         if not isinstance(records, list) or not records or not all(isinstance(r, dict) for r in records):
             raise TypeError("records must be a non-empty list[dict]")
         await self._execute_raw(await self._build_update_multiple_from_records(entity_set, table_schema_name, records))
-        return None
 
     async def _delete(self, table_schema_name: str, key: str) -> None:
         """Delete a record by GUID.
@@ -1477,10 +1477,11 @@ class _AsyncODataClient(_AsyncFileUploadMixin, _AsyncRelationshipOperationsMixin
         deleted: List[str] = []
         needs_picklist_flush = False
 
-        for column_name in names:
-            attr_meta = await self._get_attribute_metadata(
-                metadata_id, column_name, extra_select="@odata.type,AttributeType"
-            )
+        attr_metas = await asyncio.gather(*[
+            self._get_attribute_metadata(metadata_id, col, extra_select="@odata.type,AttributeType")
+            for col in names
+        ])
+        for column_name, attr_meta in zip(names, attr_metas):
             if not attr_meta:
                 raise MetadataError(
                     f"Column '{column_name}' not found on table '{entity_schema}'.",
@@ -1536,13 +1537,12 @@ class _AsyncODataClient(_AsyncFileUploadMixin, _AsyncRelationshipOperationsMixin
         if not all(isinstance(r, dict) for r in records):
             raise TypeError("All items for multi-create must be dicts")
         logical_name = table.lower()
-        enriched = []
-        for r in records:
-            r = self._lowercase_keys(r)
-            r = await self._convert_labels_to_ints(table, r)
-            if "@odata.type" not in r:
-                r = {**r, "@odata.type": f"Microsoft.Dynamics.CRM.{logical_name}"}
-            enriched.append(r)
+        lowered = [self._lowercase_keys(r) for r in records]
+        converted = await asyncio.gather(*[self._convert_labels_to_ints(table, r) for r in lowered])
+        enriched = [
+            {**r, "@odata.type": f"Microsoft.Dynamics.CRM.{logical_name}"} if "@odata.type" not in r else r
+            for r in converted
+        ]
         return _RawRequest(
             method="POST",
             url=f"{self.api}/{entity_set}/Microsoft.Dynamics.CRM.CreateMultiple",
@@ -1590,13 +1590,12 @@ class _AsyncODataClient(_AsyncFileUploadMixin, _AsyncRelationshipOperationsMixin
         :meth:`_build_update_multiple` (which assembles from ids + changes).
         """
         logical_name = table.lower()
-        enriched = []
-        for r in records:
-            r = self._lowercase_keys(r)
-            r = await self._convert_labels_to_ints(table, r)
-            if "@odata.type" not in r:
-                r = {**r, "@odata.type": f"Microsoft.Dynamics.CRM.{logical_name}"}
-            enriched.append(r)
+        lowered = [self._lowercase_keys(r) for r in records]
+        converted = await asyncio.gather(*[self._convert_labels_to_ints(table, r) for r in lowered])
+        enriched = [
+            {**r, "@odata.type": f"Microsoft.Dynamics.CRM.{logical_name}"} if "@odata.type" not in r else r
+            for r in converted
+        ]
         return _RawRequest(
             method="POST",
             url=f"{self.api}/{entity_set}/Microsoft.Dynamics.CRM.UpdateMultiple",
@@ -1661,11 +1660,11 @@ class _AsyncODataClient(_AsyncFileUploadMixin, _AsyncRelationshipOperationsMixin
                 subcode="upsert_length_mismatch",
             )
         logical_name = table.lower()
+        lowered_records = [self._lowercase_keys(r) for r in records]
+        converted = await asyncio.gather(*[self._convert_labels_to_ints(table, r) for r in lowered_records])
         targets: List[Dict[str, Any]] = []
-        for alt_key, record in zip(alternate_keys, records):
+        for alt_key, record_processed in zip(alternate_keys, converted):
             alt_key_lower = self._lowercase_keys(alt_key)
-            record_processed = self._lowercase_keys(record)
-            record_processed = await self._convert_labels_to_ints(table, record_processed)
             conflicting = {
                 k for k in set(alt_key_lower) & set(record_processed) if alt_key_lower[k] != record_processed[k]
             }

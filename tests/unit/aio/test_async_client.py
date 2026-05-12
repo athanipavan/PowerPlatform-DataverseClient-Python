@@ -166,7 +166,7 @@ class TestAsyncDataverseClientCheckClosed:
 class TestAsyncDataverseClientGetOdata:
     """Tests for _get_odata() lazy initialisation of the internal OData client."""
 
-    def test_get_odata_creates_client_on_first_call(self):
+    async def test_get_odata_creates_client_on_first_call(self):
         """_get_odata() instantiates _AsyncODataClient and stores it in _odata on first call."""
         from PowerPlatform.Dataverse.aio.data._async_odata import _AsyncODataClient
 
@@ -175,13 +175,15 @@ class TestAsyncDataverseClientGetOdata:
         od = client._get_odata()
         assert isinstance(od, _AsyncODataClient)
         assert client._odata is od
+        await client.aclose()
 
-    def test_get_odata_returns_same_instance(self):
+    async def test_get_odata_returns_same_instance(self):
         """Subsequent calls to _get_odata() return the same cached instance."""
         client = AsyncDataverseClient("https://org.crm.dynamics.com", _make_credential())
         od1 = client._get_odata()
         od2 = client._get_odata()
         assert od1 is od2
+        await client.aclose()
 
 
 class TestAsyncDataverseClientScopedOdata:

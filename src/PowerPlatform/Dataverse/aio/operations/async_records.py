@@ -5,13 +5,14 @@
 
 from __future__ import annotations
 
-from typing import Any, AsyncIterator, Dict, Iterator, List, Optional, Union, overload, TYPE_CHECKING
+from typing import Any, AsyncGenerator, Dict, List, Optional, Union, overload, TYPE_CHECKING
 
 from ...core.errors import HttpError
 from ...models.record import QueryResult, Record
 from ...models.upsert import UpsertItem
 
 if TYPE_CHECKING:
+    from ...models.filters import FilterExpression
     from ..async_client import AsyncDataverseClient
 
 
@@ -21,8 +22,8 @@ __all__ = ["AsyncRecordOperations"]
 class AsyncRecordOperations:
     """Async namespace for record-level CRUD operations.
 
-    Accessed via ``client.records``. Provides create, update, delete, and get
-    operations on individual Dataverse records.
+    Accessed via ``client.records``. Provides create, update, delete, retrieve,
+    list, and upsert operations on individual Dataverse records.
 
     :param client: The parent :class:`~PowerPlatform.Dataverse.aio.async_client.AsyncDataverseClient` instance.
     :type client: ~PowerPlatform.Dataverse.aio.async_client.AsyncDataverseClient
@@ -34,8 +35,8 @@ class AsyncRecordOperations:
             # Create a single record
             guid = await client.records.create("account", {"name": "Contoso Ltd"})
 
-            # Get a record
-            record = await client.records.get("account", guid, select=["name"])
+            # Retrieve a record
+            record = await client.records.retrieve("account", guid, select=["name"])
 
             # Update a record
             await client.records.update("account", guid, {"telephone1": "555-0100"})
@@ -224,246 +225,6 @@ class AsyncRecordOperations:
                 await od._delete(table, rid)
             return None
 
-    # -------------------------------------------------------------------- get
-
-    @overload
-    async def get(
-        self,
-        table: str,
-        record_id: str,
-        *,
-        select: Optional[List[str]] = None,
-    ) -> Record:
-        """Fetch a single record by its GUID.
-
-        :param table: Schema name of the table (e.g. ``"account"``).
-        :type table: :class:`str`
-        :param record_id: GUID of the record to retrieve.
-        :type record_id: :class:`str`
-        :param select: Optional list of column logical names to include in the
-            response.
-        :type select: list[str] or None
-
-        :return: Typed record with dict-like access for backward compatibility.
-        :rtype: :class:`~PowerPlatform.Dataverse.models.record.Record`
-
-        :raises TypeError: If ``record_id`` is not a string.
-
-        Example:
-            Fetch a record with selected columns::
-
-                record = await client.records.get(
-                    "account", account_id, select=["name", "telephone1"]
-                )
-                print(record["name"])       # dict-like access
-                print(record.id)            # structured access
-        """
-        ...
-
-    @overload
-    async def get(
-        self,
-        table: str,
-        *,
-        select: Optional[List[str]] = None,
-        filter: Optional[str] = None,
-        orderby: Optional[List[str]] = None,
-        top: Optional[int] = None,
-        expand: Optional[List[str]] = None,
-        page_size: Optional[int] = None,
-        count: bool = False,
-        include_annotations: Optional[str] = None,
-    ) -> AsyncIterator[List[Record]]:
-        """Fetch multiple records from a Dataverse table with pagination.
-
-        Returns an async generator that yields one page (list of
-        :class:`~PowerPlatform.Dataverse.models.record.Record` objects) at a
-        time. Automatically follows ``@odata.nextLink`` for server-side paging.
-
-        :param table: Schema name of the table (e.g. ``"account"`` or
-            ``"new_MyTestTable"``).
-        :type table: :class:`str`
-        :param select: Optional list of column logical names to include.
-            Column names are automatically lowercased.
-        :type select: list[str] or None
-        :param filter: Optional OData ``$filter`` expression (e.g.
-            ``"name eq 'Contoso'"``). Column names in filter expressions must
-            use exact lowercase logical names.
-        :type filter: :class:`str` or None
-        :param orderby: Optional list of sort expressions (e.g.
-            ``["name asc", "createdon desc"]``). Column names are automatically
-            lowercased.
-        :type orderby: list[str] or None
-        :param top: Optional maximum total number of records to return.
-        :type top: :class:`int` or None
-        :param expand: Optional list of navigation properties to expand (e.g.
-            ``["primarycontactid"]``). Case-sensitive; must match server-defined
-            names exactly.
-        :type expand: list[str] or None
-        :param page_size: Optional per-page size hint sent via
-            ``Prefer: odata.maxpagesize``.
-        :type page_size: :class:`int` or None
-        :param count: If ``True``, adds ``$count=true`` to include a total
-            record count in the response.
-        :type count: :class:`bool`
-        :param include_annotations: OData annotation pattern for the
-            ``Prefer: odata.include-annotations`` header (e.g. ``"*"`` or
-            ``"OData.Community.Display.V1.FormattedValue"``), or ``None``.
-        :type include_annotations: :class:`str` or None
-
-        :return: Async generator yielding pages, where each page is a list of
-            :class:`~PowerPlatform.Dataverse.models.record.Record` objects.
-        :rtype: collections.abc.AsyncIterator[list[~PowerPlatform.Dataverse.models.record.Record]]
-
-        Example:
-            Fetch with filtering and pagination::
-
-                async for page in await client.records.get(
-                    "account",
-                    filter="statecode eq 0",
-                    select=["name", "telephone1"],
-                    page_size=50,
-                ):
-                    for record in page:
-                        print(record["name"])
-        """
-        ...
-
-    async def get(
-        self,
-        table: str,
-        record_id: Optional[str] = None,
-        *,
-        select: Optional[List[str]] = None,
-        filter: Optional[str] = None,
-        orderby: Optional[List[str]] = None,
-        top: Optional[int] = None,
-        expand: Optional[List[str]] = None,
-        page_size: Optional[int] = None,
-        count: bool = False,
-        include_annotations: Optional[str] = None,
-    ) -> Union[Record, AsyncIterator[List[Record]]]:
-        """Fetch a single record by ID, or fetch multiple records with pagination.
-
-        This method has two usage patterns:
-
-        **Fetch a single record** -- ``await get(table, record_id, *, select=...)``
-
-        Pass ``record_id`` as a positional argument to retrieve one record
-        and get back a :class:`~PowerPlatform.Dataverse.models.record.Record`.
-        Query parameters (``filter``, ``orderby``, ``top``, ``expand``,
-        ``page_size``) must not be provided.
-
-        **Fetch multiple records** -- ``async for page in await get(table, *, select=..., ...)``
-
-        Omit ``record_id`` to perform a paginated fetch and get back an async
-        generator that yields one page (list of record objects) at a time.
-        Automatically follows ``@odata.nextLink`` for server-side paging.
-
-        :param table: Schema name of the table (e.g. ``"account"`` or
-            ``"new_MyTestTable"``).
-        :type table: :class:`str`
-        :param record_id: GUID of the record to retrieve. When omitted,
-            performs a multi-record fetch instead.
-        :type record_id: :class:`str` or None
-        :param select: Optional list of column logical names to include.
-            Column names are automatically lowercased.
-        :type select: list[str] or None
-        :param filter: Optional OData ``$filter`` expression (e.g.
-            ``"name eq 'Contoso'"``). Column names in filter expressions must
-            use exact lowercase logical names. Only used for multi-record
-            queries.
-        :type filter: :class:`str` or None
-        :param orderby: Optional list of sort expressions (e.g.
-            ``["name asc", "createdon desc"]``). Column names are
-            automatically lowercased. Only used for multi-record queries.
-        :type orderby: list[str] or None
-        :param top: Optional maximum total number of records to return. Only
-            used for multi-record queries.
-        :type top: :class:`int` or None
-        :param expand: Optional list of navigation properties to expand (e.g.
-            ``["primarycontactid"]``). Case-sensitive; must match
-            server-defined names exactly. Only used for multi-record queries.
-        :type expand: list[str] or None
-        :param page_size: Optional per-page size hint sent via
-            ``Prefer: odata.maxpagesize``. Only used for multi-record queries.
-        :type page_size: :class:`int` or None
-        :param count: If ``True``, adds ``$count=true`` to include a total
-            record count in the response. Only used for multi-record queries.
-        :type count: :class:`bool`
-        :param include_annotations: OData annotation pattern for the
-            ``Prefer: odata.include-annotations`` header (e.g. ``"*"`` or
-            ``"OData.Community.Display.V1.FormattedValue"``), or ``None``.
-            Only used for multi-record queries.
-        :type include_annotations: :class:`str` or None
-
-        :return: A single record when ``record_id`` is provided, or an async
-            generator yielding pages (lists of record objects) when fetching
-            multiple records.
-        :rtype: ~PowerPlatform.Dataverse.models.record.Record or
-            collections.abc.AsyncIterator[list[~PowerPlatform.Dataverse.models.record.Record]]
-
-        :raises TypeError: If ``record_id`` is provided but not a string.
-        :raises ValueError: If query parameters are provided alongside
-            ``record_id``.
-
-        Example:
-            Fetch a single record::
-
-                record = await client.records.get(
-                    "account", account_id, select=["name", "telephone1"]
-                )
-                print(record["name"])
-
-            Fetch multiple records with pagination::
-
-                async for page in await client.records.get(
-                    "account",
-                    filter="statecode eq 0",
-                    select=["name", "telephone1"],
-                    page_size=50,
-                ):
-                    for record in page:
-                        print(record["name"])
-        """
-        if record_id is not None:
-            if not isinstance(record_id, str):
-                raise TypeError("record_id must be str")
-            if (
-                filter is not None
-                or orderby is not None
-                or top is not None
-                or expand is not None
-                or page_size is not None
-                or count is not False
-                or include_annotations is not None
-            ):
-                raise ValueError(
-                    "Cannot specify query parameters (filter, orderby, top, "
-                    "expand, page_size, count, include_annotations) when "
-                    "fetching a single record by ID"
-                )
-            async with self._client._scoped_odata() as od:
-                raw = await od._get(table, record_id, select=select)
-                return Record.from_api_response(table, raw, record_id=record_id)
-
-        async def _paged() -> AsyncIterator[List[Record]]:
-            async with self._client._scoped_odata() as od:
-                async for page in od._get_multiple(
-                    table,
-                    select=select,
-                    filter=filter,
-                    orderby=orderby,
-                    top=top,
-                    expand=expand,
-                    page_size=page_size,
-                    count=count,
-                    include_annotations=include_annotations,
-                ):
-                    yield [Record.from_api_response(table, row) for row in page]
-
-        return _paged()
-
     # --------------------------------------------------------------- retrieve
 
     async def retrieve(
@@ -477,8 +238,7 @@ class AsyncRecordOperations:
     ) -> Optional[Record]:
         """Fetch a single record by its GUID, returning ``None`` if not found.
 
-        GA replacement for ``records.get(table, record_id)``. Returns ``None``
-        instead of raising when the record does not exist (HTTP 404).
+        Returns ``None`` instead of raising when the record does not exist (HTTP 404).
 
         :param table: Schema name of the table (e.g. ``"account"``).
         :type table: :class:`str`
@@ -524,7 +284,7 @@ class AsyncRecordOperations:
         self,
         table: str,
         *,
-        filter: Optional[Union[str, Any]] = None,
+        filter: Optional[Union[str, "FilterExpression"]] = None,
         select: Optional[List[str]] = None,
         orderby: Optional[List[str]] = None,
         top: Optional[int] = None,
@@ -535,8 +295,7 @@ class AsyncRecordOperations:
     ) -> QueryResult:
         """Fetch multiple records and return them as a :class:`QueryResult`.
 
-        GA replacement for ``records.get(table, filter=...)``. All pages are
-        collected eagerly and returned as a single :class:`QueryResult`.
+        All pages are collected eagerly and returned as a single :class:`QueryResult`.
 
         :param table: Schema name of the table (e.g. ``"account"``).
         :type table: :class:`str`
@@ -562,16 +321,18 @@ class AsyncRecordOperations:
 
         Example::
 
+            from PowerPlatform.Dataverse import col
+
             result = await client.records.list(
                 "account",
-                filter="statecode eq 0",
+                filter=col("statecode") == 0,
                 select=["name", "statuscode"],
                 orderby=["name asc"],
                 top=100,
                 include_annotations="OData.Community.Display.V1.FormattedValue",
             )
             for record in result:
-                print(record["name"])
+                print(record["name"], record.get("statuscode@OData.Community.Display.V1.FormattedValue"))
         """
         filter_str: Optional[str] = str(filter) if filter is not None else None
         all_records: List[Record] = []
@@ -596,7 +357,7 @@ class AsyncRecordOperations:
         self,
         table: str,
         *,
-        filter: Optional[Union[str, Any]] = None,
+        filter: Optional[Union[str, "FilterExpression"]] = None,
         select: Optional[List[str]] = None,
         orderby: Optional[List[str]] = None,
         top: Optional[int] = None,
@@ -604,12 +365,13 @@ class AsyncRecordOperations:
         page_size: Optional[int] = None,
         count: bool = False,
         include_annotations: Optional[str] = None,
-    ) -> AsyncIterator[QueryResult]:
+    ) -> AsyncGenerator[QueryResult, None]:
         """Lazily yield one :class:`QueryResult` per HTTP page.
 
-        Streaming counterpart to :meth:`list`. Each iteration triggers one
-        network request via ``@odata.nextLink``. One-shot — do not iterate
-        more than once.
+        Streaming counterpart to :meth:`list` — use when you want to process
+        records page by page without loading all into memory. Each iteration
+        triggers one network request via ``@odata.nextLink``. One-shot — do
+        not iterate more than once.
 
         :param table: Schema name of the table (e.g. ``"account"``).
         :type table: :class:`str`
@@ -630,8 +392,8 @@ class AsyncRecordOperations:
         :param include_annotations: OData annotation pattern for the
             ``Prefer: odata.include-annotations`` header, or ``None``.
         :type include_annotations: :class:`str` or None
-        :return: Async iterator of per-page :class:`QueryResult` objects.
-        :rtype: AsyncIterator[:class:`~PowerPlatform.Dataverse.models.record.QueryResult`]
+        :return: Async generator of per-page :class:`QueryResult` objects.
+        :rtype: AsyncGenerator[:class:`~PowerPlatform.Dataverse.models.record.QueryResult`, None]
 
         Example::
 
@@ -695,18 +457,46 @@ class AsyncRecordOperations:
                     )
                 ])
 
-            Upsert multiple records::
+            Upsert a single record using a plain dict::
+
+                await client.records.upsert("account", [
+                    {
+                        "alternate_key": {"accountnumber": "ACC-001"},
+                        "record": {"name": "Contoso Ltd", "description": "Primary account"},
+                    },
+                ])
+
+            Upsert multiple records using ``UpsertItem``::
+
+                from PowerPlatform.Dataverse.models.upsert import UpsertItem
 
                 await client.records.upsert("account", [
                     UpsertItem(
                         alternate_key={"accountnumber": "ACC-001"},
-                        record={"name": "Contoso Ltd"},
+                        record={"name": "Contoso Ltd", "description": "Primary account"},
                     ),
                     UpsertItem(
                         alternate_key={"accountnumber": "ACC-002"},
-                        record={"name": "Fabrikam Inc"},
+                        record={"name": "Fabrikam Inc", "description": "Partner account"},
                     ),
                 ])
+
+            Upsert multiple records using plain dicts::
+
+                await client.records.upsert("account", [
+                    {
+                        "alternate_key": {"accountnumber": "ACC-001"},
+                        "record": {"name": "Contoso Ltd", "description": "Primary account"},
+                    },
+                    {
+                        "alternate_key": {"accountnumber": "ACC-002"},
+                        "record": {"name": "Fabrikam Inc", "description": "Partner account"},
+                    },
+                ])
+
+            The ``alternate_key`` dict may contain multiple columns when the configured
+            alternate key is composite, e.g.
+            ``{"accountnumber": "ACC-001", "address1_postalcode": "98052"}``.
         """
         if not isinstance(items, list) or not items:
             raise TypeError("items must be a non-empty list of UpsertItem or dicts")

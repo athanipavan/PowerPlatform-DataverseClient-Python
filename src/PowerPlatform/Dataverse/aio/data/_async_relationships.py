@@ -11,8 +11,12 @@ from __future__ import annotations
 
 __all__ = []
 
+import asyncio
 import re
 from typing import Any, Dict, List, Optional
+
+from ...core.errors import MetadataError
+from ...core._error_codes import METADATA_TABLE_NOT_FOUND
 
 
 class _AsyncRelationshipOperationsMixin:
@@ -207,9 +211,6 @@ class _AsyncRelationshipOperationsMixin:
         :raises MetadataError: If the table is not found.
         :raises HttpError: If the Web API request fails.
         """
-        from ...core.errors import MetadataError
-        from ...core._error_codes import METADATA_TABLE_NOT_FOUND
-
         ent = await self._get_entity_by_table_schema_name(table_schema_name)
         if not ent or not ent.get("MetadataId"):
             raise MetadataError(
@@ -237,9 +238,12 @@ class _AsyncRelationshipOperationsMixin:
         many_to_one_url = f"{self.api}/EntityDefinitions({metadata_id})/ManyToOneRelationships"
         many_to_many_url = f"{self.api}/EntityDefinitions({metadata_id})/ManyToManyRelationships"
 
-        r1 = await self._request("get", one_to_many_url, headers=await self._headers(), params=one_to_many_params)
-        r2 = await self._request("get", many_to_one_url, headers=await self._headers(), params=one_to_many_params)
-        r3 = await self._request("get", many_to_many_url, headers=await self._headers(), params=many_to_many_params)
+        headers = await self._headers()
+        r1, r2, r3 = await asyncio.gather(
+            self._request("get", one_to_many_url, headers=headers, params=one_to_many_params),
+            self._request("get", many_to_one_url, headers=headers, params=one_to_many_params),
+            self._request("get", many_to_many_url, headers=headers, params=many_to_many_params),
+        )
 
         return (
             (await r1.json()).get("value", []) + (await r2.json()).get("value", []) + (await r3.json()).get("value", [])

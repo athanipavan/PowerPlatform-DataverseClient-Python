@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from PowerPlatform.Dataverse.aio.data._async_batch import _AsyncBatchClient
+from PowerPlatform.Dataverse.aio.data._async_batch import _AsyncBatchClient, _SyncResponseWrapper
 from PowerPlatform.Dataverse.core.errors import MetadataError, ValidationError
 from PowerPlatform.Dataverse.data._batch_base import (
     _RecordCreate,
@@ -18,10 +18,19 @@ from PowerPlatform.Dataverse.data._batch_base import (
     _RecordUpdate,
     _RecordUpsert,
     _TableAddColumns,
+    _TableCreate,
     _TableDelete,
+    _TableGet,
+    _TableList,
+    _TableCreateOneToMany,
+    _TableCreateManyToMany,
+    _TableDeleteRelationship,
+    _TableGetRelationship,
+    _TableCreateLookupField,
     _TableRemoveColumns,
     _QuerySql,
     _ChangeSet,
+    _MAX_BATCH_SIZE,
 )
 from PowerPlatform.Dataverse.models.upsert import UpsertItem
 
@@ -107,6 +116,19 @@ def _make_batch_client():
             content_id=None,
         )
     )
+    # Sync _build_* for pure-logic table intents inherited from _BatchBase
+    _raw = lambda method, url: MagicMock(method=method, url=url, body=None, headers=None, content_id=None)
+    od._build_create_entity = MagicMock(return_value=_raw("POST", "https://x/EntityDefinitions"))
+    od._build_get_entity = MagicMock(return_value=_raw("GET", "https://x/EntityDefinitions(m)"))
+    od._build_list_entities = MagicMock(return_value=_raw("GET", "https://x/EntityDefinitions"))
+    od._build_create_relationship = MagicMock(return_value=_raw("POST", "https://x/RelationshipDefinitions"))
+    od._build_delete_relationship = MagicMock(return_value=_raw("DELETE", "https://x/RelationshipDefinitions(r)"))
+    od._build_get_relationship = MagicMock(return_value=_raw("GET", "https://x/RelationshipDefinitions(r)"))
+    _mock_lookup = MagicMock()
+    _mock_lookup.to_dict.return_value = {}
+    _mock_rel = MagicMock()
+    _mock_rel.to_dict.return_value = {}
+    od._build_lookup_field_models = MagicMock(return_value=(_mock_lookup, _mock_rel))
     return _AsyncBatchClient(od), od
 
 
@@ -603,3 +625,214 @@ class TestRequireEntityMetadata:
         od._get_entity_by_table_schema_name = AsyncMock(return_value=None)
         with pytest.raises(MetadataError):
             await client._require_entity_metadata("nonexistent")
+
+
+# ---------------------------------------------------------------------------
+# _SyncResponseWrapper
+# ---------------------------------------------------------------------------
+
+
+class TestSyncResponseWrapper:
+    """Tests for the _SyncResponseWrapper adapter used in execute()."""
+
+    def test_json_returns_payload(self):
+        """json() returns the payload passed at construction time."""
+        wrapper = _SyncResponseWrapper(
+            status_code=200,
+            headers={"Content-Type": "application/json"},
+            text='{"value": []}',
+            json_payload={"value": []},
+        )
+        assert wrapper.json() == {"value": []}
+
+    def test_json_returns_none_payload(self):
+        """json() returns None when payload was None."""
+        wrapper = _SyncResponseWrapper(200, {}, "", None)
+        assert wrapper.json() is None
+
+    def test_status_code_stored(self):
+        """status_code is accessible as an attribute."""
+        wrapper = _SyncResponseWrapper(207, {}, "", {})
+        assert wrapper.status_code == 207
+
+    def test_text_stored(self):
+        """text is accessible as an attribute."""
+        wrapper = _SyncResponseWrapper(200, {}, "body text", {})
+        assert wrapper.text == "body text"
+
+
+# ---------------------------------------------------------------------------
+# execute() edge cases
+# ---------------------------------------------------------------------------
+
+
+class TestExecuteEdgeCases:
+    """Tests for execute() error paths not covered by TestExecute."""
+
+    async def test_batch_size_exceeded_raises(self):
+        """execute() raises ValidationError when more than _MAX_BATCH_SIZE items are resolved."""
+        client, od = _make_batch_client()
+        # _RecordCreate × (_MAX_BATCH_SIZE + 1) — each resolves to one request
+        items = [_RecordCreate(table="account", data={"name": f"X{i}"}) for i in range(_MAX_BATCH_SIZE + 1)]
+        with pytest.raises(ValidationError, match="exceeds the limit"):
+            await client.execute(items)
+
+    async def test_json_parse_failure_defaults_to_empty_dict(self):
+        """execute() uses an empty dict for json_payload when r.json() raises."""
+        from PowerPlatform.Dataverse.models.batch import BatchResult
+
+        client, od = _make_batch_client()
+        resp_mock = _batch_resp(status=200)
+        resp_mock.json = AsyncMock(side_effect=ValueError("bad json"))
+        od._request = AsyncMock(return_value=resp_mock)
+        item = _RecordCreate(table="account", data={"name": "X"})
+        with patch.object(client, "_parse_batch_response", return_value=BatchResult()) as mock_parse:
+            await client.execute([item])
+        # _parse_batch_response was called; the wrapper's json() returns {} (fallback)
+        wrapper = mock_parse.call_args[0][0]
+        assert wrapper.json() == {}
+
+
+# ---------------------------------------------------------------------------
+# _resolve_all() edge cases
+# ---------------------------------------------------------------------------
+
+
+class TestResolveAllEdgeCases:
+    """Tests for _resolve_all() paths not covered elsewhere."""
+
+    async def test_empty_changeset_is_skipped(self):
+        """An empty _ChangeSet is silently dropped from the resolved list."""
+        client, od = _make_batch_client()
+        cs = _ChangeSet(_counter=[1])
+        # No operations added — operations list is empty
+        result = await client._resolve_all([cs])
+        assert result == []
+
+    async def test_non_changeset_item_extended(self):
+        """Non-changeset items are resolved and extended into the flat result."""
+        client, od = _make_batch_client()
+        item = _RecordCreate(table="account", data={"name": "X"})
+        result = await client._resolve_all([item])
+        assert len(result) == 1
+
+
+# ---------------------------------------------------------------------------
+# _resolve_item() full dispatch coverage
+# ---------------------------------------------------------------------------
+
+
+class TestResolveItemDispatch:
+    """One test per intent type — drives every branch of _resolve_item().
+
+    Each test replaces the specific resolver method with a mock so only the
+    dispatch logic is exercised.  Record/SQL resolvers are async (awaited);
+    pure table resolvers inherited from _BatchBase are sync (not awaited).
+    """
+
+    _sentinel = MagicMock(method="GET", url="https://x/test", body=None, headers=None, content_id=None)
+
+    def _async_mock(self):
+        return AsyncMock(return_value=[self._sentinel])
+
+    def _sync_mock(self):
+        return MagicMock(return_value=[self._sentinel])
+
+    async def test_dispatch_record_update(self):
+        client, _ = _make_batch_client()
+        client._resolve_record_update = self._async_mock()
+        result = await client._resolve_item(_RecordUpdate(table="account", ids="g", changes={"name": "X"}))
+        client._resolve_record_update.assert_called_once()
+
+    async def test_dispatch_record_upsert(self):
+        client, _ = _make_batch_client()
+        client._resolve_record_upsert = self._async_mock()
+        item = UpsertItem(alternate_key={"k": "v"}, record={"name": "X"})
+        result = await client._resolve_item(_RecordUpsert(table="account", items=[item]))
+        client._resolve_record_upsert.assert_called_once()
+
+    async def test_dispatch_table_create(self):
+        client, _ = _make_batch_client()
+        client._resolve_table_create = self._sync_mock()
+        result = await client._resolve_item(_TableCreate(table="new_Test", columns={"new_Name": "string"}))
+        client._resolve_table_create.assert_called_once()
+
+    async def test_dispatch_table_delete(self):
+        client, _ = _make_batch_client()
+        client._resolve_table_delete = self._async_mock()
+        result = await client._resolve_item(_TableDelete(table="new_Test"))
+        client._resolve_table_delete.assert_called_once()
+
+    async def test_dispatch_table_get(self):
+        client, _ = _make_batch_client()
+        client._resolve_table_get = self._sync_mock()
+        result = await client._resolve_item(_TableGet(table="account"))
+        client._resolve_table_get.assert_called_once()
+
+    async def test_dispatch_table_list(self):
+        client, _ = _make_batch_client()
+        client._resolve_table_list = self._sync_mock()
+        result = await client._resolve_item(_TableList())
+        client._resolve_table_list.assert_called_once()
+
+    async def test_dispatch_table_add_columns(self):
+        client, _ = _make_batch_client()
+        client._resolve_table_add_columns = self._async_mock()
+        result = await client._resolve_item(_TableAddColumns(table="account", columns={"new_X": "string"}))
+        client._resolve_table_add_columns.assert_called_once()
+
+    async def test_dispatch_table_remove_columns(self):
+        client, _ = _make_batch_client()
+        client._resolve_table_remove_columns = self._async_mock()
+        result = await client._resolve_item(_TableRemoveColumns(table="account", columns="new_X"))
+        client._resolve_table_remove_columns.assert_called_once()
+
+    async def test_dispatch_table_create_one_to_many(self):
+        client, _ = _make_batch_client()
+        client._resolve_table_create_one_to_many = self._sync_mock()
+        op = _TableCreateOneToMany(relationship=MagicMock(), lookup=MagicMock())
+        result = await client._resolve_item(op)
+        client._resolve_table_create_one_to_many.assert_called_once()
+
+    async def test_dispatch_table_create_many_to_many(self):
+        client, _ = _make_batch_client()
+        client._resolve_table_create_many_to_many = self._sync_mock()
+        op = _TableCreateManyToMany(relationship=MagicMock())
+        result = await client._resolve_item(op)
+        client._resolve_table_create_many_to_many.assert_called_once()
+
+    async def test_dispatch_table_delete_relationship(self):
+        client, _ = _make_batch_client()
+        client._resolve_table_delete_relationship = self._sync_mock()
+        result = await client._resolve_item(_TableDeleteRelationship(relationship_id="rel-guid"))
+        client._resolve_table_delete_relationship.assert_called_once()
+
+    async def test_dispatch_table_get_relationship(self):
+        client, _ = _make_batch_client()
+        client._resolve_table_get_relationship = self._sync_mock()
+        result = await client._resolve_item(_TableGetRelationship(schema_name="new_a_c"))
+        client._resolve_table_get_relationship.assert_called_once()
+
+    async def test_dispatch_table_create_lookup_field(self):
+        client, _ = _make_batch_client()
+        client._resolve_table_create_lookup_field = self._sync_mock()
+        result = await client._resolve_item(
+            _TableCreateLookupField(
+                referencing_table="contact",
+                lookup_field_name="new_accountid",
+                referenced_table="account",
+            )
+        )
+        client._resolve_table_create_lookup_field.assert_called_once()
+
+    async def test_dispatch_query_sql(self):
+        client, _ = _make_batch_client()
+        client._resolve_query_sql = self._async_mock()
+        result = await client._resolve_item(_QuerySql(sql="SELECT accountid FROM account"))
+        client._resolve_query_sql.assert_called_once()
+
+    async def test_dispatch_unknown_type_raises(self):
+        """An unrecognised intent type raises ValidationError."""
+        client, _ = _make_batch_client()
+        with pytest.raises(ValidationError, match="Unknown batch item type"):
+            await client._resolve_item("not-an-intent")

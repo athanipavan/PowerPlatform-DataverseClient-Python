@@ -103,6 +103,10 @@ asyncio_mode = "auto"
 
 [tool.coverage.run]
 source = ["src/PowerPlatform"]
+omit = [
+    "*/Dataverse/_skill_installer.py",
+    "*/Dataverse/extensions/__init__.py",
+]
 
 [tool.coverage.report]
 fail_under = 90

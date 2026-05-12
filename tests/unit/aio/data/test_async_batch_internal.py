@@ -14,6 +14,7 @@ from PowerPlatform.Dataverse.data._batch_base import (
     _RecordCreate,
     _RecordDelete,
     _RecordGet,
+    _RecordList,
     _RecordUpdate,
     _RecordUpsert,
     _TableAddColumns,
@@ -80,6 +81,9 @@ def _make_batch_client():
         return_value=MagicMock(
             method="POST", url="https://x/accounts/UpsertMultiple", body="{}", headers=None, content_id=None
         )
+    )
+    od._build_list = AsyncMock(
+        return_value=MagicMock(method="GET", url="https://x/accounts", body=None, headers=None, content_id=None)
     )
     od._build_sql = AsyncMock(
         return_value=MagicMock(method="GET", url="https://x/accounts?sql=...", body=None, headers=None, content_id=None)
@@ -269,6 +273,132 @@ class TestResolveRecordGet:
         result = await client._resolve_record_get(op)
         assert len(result) == 1
         od._build_get.assert_called_once_with("account", "guid-1", select=["name"], expand=None, include_annotations=None)
+
+    async def test_passes_expand_to_build_get(self):
+        """expand= is forwarded from _RecordGet to _build_get."""
+        client, od = _make_batch_client()
+        op = _RecordGet(table="account", record_id="guid-1", expand=["primarycontactid"])
+        await client._resolve_record_get(op)
+        od._build_get.assert_called_once_with(
+            "account", "guid-1", select=None, expand=["primarycontactid"], include_annotations=None
+        )
+
+    async def test_passes_include_annotations_to_build_get(self):
+        """include_annotations= is forwarded from _RecordGet to _build_get."""
+        client, od = _make_batch_client()
+        annotation = "OData.Community.Display.V1.FormattedValue"
+        op = _RecordGet(table="account", record_id="guid-1", include_annotations=annotation)
+        await client._resolve_record_get(op)
+        od._build_get.assert_called_once_with(
+            "account", "guid-1", select=None, expand=None, include_annotations=annotation
+        )
+
+    async def test_passes_all_params_to_build_get(self):
+        """All _RecordGet fields are forwarded together to _build_get."""
+        client, od = _make_batch_client()
+        annotation = "OData.Community.Display.V1.FormattedValue"
+        op = _RecordGet(
+            table="account",
+            record_id="guid-1",
+            select=["name"],
+            expand=["primarycontactid"],
+            include_annotations=annotation,
+        )
+        result = await client._resolve_record_get(op)
+        assert len(result) == 1
+        od._build_get.assert_called_once_with(
+            "account", "guid-1", select=["name"], expand=["primarycontactid"], include_annotations=annotation
+        )
+
+
+# ---------------------------------------------------------------------------
+# _resolve_record_list()
+# ---------------------------------------------------------------------------
+
+
+class TestResolveRecordList:
+    """Tests for _resolve_record_list() intent-to-request translation."""
+
+    async def test_produces_one_request(self):
+        """A _RecordList op produces exactly one _build_list request."""
+        client, od = _make_batch_client()
+        op = _RecordList(table="account")
+        result = await client._resolve_record_list(op)
+        assert len(result) == 1
+        od._build_list.assert_called_once()
+
+    async def test_passes_table_to_build_list(self):
+        """The table name is forwarded to _build_list as first positional arg."""
+        client, od = _make_batch_client()
+        op = _RecordList(table="contact")
+        await client._resolve_record_list(op)
+        call_args = od._build_list.call_args
+        assert call_args[0][0] == "contact"
+
+    async def test_passes_filter(self):
+        """filter= is forwarded from _RecordList to _build_list."""
+        client, od = _make_batch_client()
+        op = _RecordList(table="account", filter="statecode eq 0")
+        await client._resolve_record_list(op)
+        assert od._build_list.call_args[1]["filter"] == "statecode eq 0"
+
+    async def test_passes_select(self):
+        """select= is forwarded from _RecordList to _build_list."""
+        client, od = _make_batch_client()
+        op = _RecordList(table="account", select=["name", "revenue"])
+        await client._resolve_record_list(op)
+        assert od._build_list.call_args[1]["select"] == ["name", "revenue"]
+
+    async def test_passes_top(self):
+        """top= is forwarded from _RecordList to _build_list."""
+        client, od = _make_batch_client()
+        op = _RecordList(table="account", top=50)
+        await client._resolve_record_list(op)
+        assert od._build_list.call_args[1]["top"] == 50
+
+    async def test_passes_orderby(self):
+        """orderby= is forwarded from _RecordList to _build_list."""
+        client, od = _make_batch_client()
+        op = _RecordList(table="account", orderby=["name asc"])
+        await client._resolve_record_list(op)
+        assert od._build_list.call_args[1]["orderby"] == ["name asc"]
+
+    async def test_passes_expand(self):
+        """expand= is forwarded from _RecordList to _build_list."""
+        client, od = _make_batch_client()
+        op = _RecordList(table="account", expand=["primarycontactid"])
+        await client._resolve_record_list(op)
+        assert od._build_list.call_args[1]["expand"] == ["primarycontactid"]
+
+    async def test_passes_page_size(self):
+        """page_size= is forwarded from _RecordList to _build_list."""
+        client, od = _make_batch_client()
+        op = _RecordList(table="account", page_size=200)
+        await client._resolve_record_list(op)
+        assert od._build_list.call_args[1]["page_size"] == 200
+
+    async def test_passes_count(self):
+        """count=True is forwarded from _RecordList to _build_list."""
+        client, od = _make_batch_client()
+        op = _RecordList(table="account", count=True)
+        await client._resolve_record_list(op)
+        assert od._build_list.call_args[1]["count"] is True
+
+    async def test_passes_include_annotations(self):
+        """include_annotations= is forwarded from _RecordList to _build_list."""
+        client, od = _make_batch_client()
+        annotation = "OData.Community.Display.V1.FormattedValue"
+        op = _RecordList(table="account", include_annotations=annotation)
+        await client._resolve_record_list(op)
+        assert od._build_list.call_args[1]["include_annotations"] == annotation
+
+    async def test_resolve_item_dispatch(self):
+        """_resolve_item dispatches _RecordList correctly."""
+        client, od = _make_batch_client()
+        op = _RecordList(table="account", filter="statecode eq 0")
+        result = await client._resolve_item(op)
+        assert len(result) == 1
+        od._build_list.assert_called_once()
 
 
 # ---------------------------------------------------------------------------

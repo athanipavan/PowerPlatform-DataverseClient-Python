@@ -9,7 +9,9 @@ from azure.core.credentials_async import AsyncTokenCredential
 
 from PowerPlatform.Dataverse.aio.async_client import AsyncDataverseClient
 from PowerPlatform.Dataverse.aio.operations.async_query import AsyncQueryOperations
-from PowerPlatform.Dataverse.models.record import Record
+from PowerPlatform.Dataverse.aio.models.async_fetchxml_query import AsyncFetchXmlQuery
+from PowerPlatform.Dataverse.aio.models.async_query_builder import AsyncQueryBuilder
+from PowerPlatform.Dataverse.models.record import QueryResult, Record
 
 
 def _make_async_client_with_od(mock_od):
@@ -25,13 +27,156 @@ def _make_async_client_with_od(mock_od):
     return client
 
 
+_SIMPLE_FETCHXML = '<fetch top="5"><entity name="account"><attribute name="name"/></entity></fetch>'
+
+
 class TestAsyncQueryOperationsNamespace:
     def test_namespace_type(self, async_client):
         assert isinstance(async_client.query, AsyncQueryOperations)
 
-    def test_no_builder_attribute(self, async_client):
-        """builder() is intentionally absent — QueryBuilder.execute() is sync-only."""
-        assert not hasattr(async_client.query, "builder")
+    def test_builder_returns_async_query_builder(self, async_client):
+        """builder() returns an AsyncQueryBuilder bound to this client."""
+        qb = async_client.query.builder("account")
+        assert isinstance(qb, AsyncQueryBuilder)
+        assert qb._query_ops is async_client.query
+
+    def test_fetchxml_returns_async_fetchxml_query(self, async_client):
+        """fetchxml() returns an AsyncFetchXmlQuery for valid XML."""
+        q = async_client.query.fetchxml(_SIMPLE_FETCHXML)
+        assert isinstance(q, AsyncFetchXmlQuery)
+        assert q._entity_name == "account"
+
+
+class TestAsyncQueryBuilder:
+    async def test_execute_returns_query_result(self, async_client, mock_od):
+        """builder().execute() collects all pages into a QueryResult."""
+        async def _pages(*args, **kwargs):
+            yield [{"name": "Contoso", "accountid": "g1"}]
+            yield [{"name": "Fabrikam", "accountid": "g2"}]
+
+        mock_od._get_multiple = _pages
+
+        result = await (async_client.query.builder("account")
+                        .select("name")
+                        .execute())
+
+        assert isinstance(result, QueryResult)
+        assert len(result) == 2
+        assert result[0]["name"] == "Contoso"
+        assert result[1]["name"] == "Fabrikam"
+
+    async def test_execute_pages_yields_per_page(self, async_client, mock_od):
+        """builder().execute_pages() yields one QueryResult per page."""
+        async def _pages(*args, **kwargs):
+            yield [{"name": "A", "accountid": "g1"}]
+            yield [{"name": "B", "accountid": "g2"}]
+
+        mock_od._get_multiple = _pages
+
+        pages = []
+        async for page in (async_client.query.builder("account")
+                           .select("name")
+                           .execute_pages()):
+            pages.append(page)
+
+        assert len(pages) == 2
+        assert pages[0][0]["name"] == "A"
+        assert pages[1][0]["name"] == "B"
+
+    async def test_execute_raises_without_scope(self, async_client):
+        """execute() raises ValueError when no select/where/top/page_size is set."""
+        with pytest.raises(ValueError, match="full-table scans"):
+            await async_client.query.builder("account").execute()
+
+    async def test_execute_raises_when_unbound(self):
+        """execute() raises RuntimeError when builder was not created via client.query.builder()."""
+        qb = AsyncQueryBuilder("account")
+        qb.select("name")
+        with pytest.raises(RuntimeError, match="client.query.builder"):
+            await qb.execute()
+
+    async def test_execute_pages_raises_without_scope(self, async_client):
+        """execute_pages() raises ValueError when no scope constraint is set."""
+        with pytest.raises(ValueError, match="full-table scans"):
+            async for _ in async_client.query.builder("account").execute_pages():
+                pass
+
+    def test_chaining_methods_return_self(self, async_client):
+        """All fluent methods return the same AsyncQueryBuilder instance."""
+        from PowerPlatform.Dataverse.models.filters import col
+        qb = async_client.query.builder("account")
+        assert qb.select("name") is qb
+        assert qb.where(col("statecode") == 0) is qb
+        assert qb.order_by("name") is qb
+        assert qb.top(10) is qb
+        assert qb.page_size(5) is qb
+
+
+class TestAsyncFetchXmlQueryFactory:
+    def test_fetchxml_invalid_type_raises(self, async_client):
+        """fetchxml() raises ValidationError when xml is not a string."""
+        from PowerPlatform.Dataverse.core.errors import ValidationError
+        with pytest.raises(ValidationError):
+            async_client.query.fetchxml(123)
+
+    def test_fetchxml_empty_raises(self, async_client):
+        """fetchxml() raises ValidationError for empty string."""
+        from PowerPlatform.Dataverse.core.errors import ValidationError
+        with pytest.raises(ValidationError):
+            async_client.query.fetchxml("   ")
+
+    def test_fetchxml_malformed_raises(self, async_client):
+        """fetchxml() raises ValidationError for malformed XML."""
+        from PowerPlatform.Dataverse.core.errors import ValidationError
+        with pytest.raises(ValidationError, match="not well-formed"):
+            async_client.query.fetchxml("<fetch><entity name='account'>")
+
+    def test_fetchxml_missing_entity_element_raises(self, async_client):
+        """fetchxml() raises ValueError when <entity> element is absent."""
+        with pytest.raises(ValueError, match="<entity>"):
+            async_client.query.fetchxml("<fetch><filter/></fetch>")
+
+    def test_fetchxml_missing_entity_name_raises(self, async_client):
+        """fetchxml() raises ValueError when <entity> has no name attribute."""
+        with pytest.raises(ValueError, match="name"):
+            async_client.query.fetchxml("<fetch><entity><attribute name='x'/></entity></fetch>")
+
+
+class TestAsyncFetchXmlQueryExecution:
+    async def test_execute_returns_query_result(self, async_client, mock_od):
+        """AsyncFetchXmlQuery.execute() collects all pages into a QueryResult."""
+        mock_od._entity_set_from_schema_name = AsyncMock(return_value="accounts")
+
+        resp = MagicMock()
+        resp.json = AsyncMock(return_value={
+            "value": [{"name": "Contoso", "accountid": "g1"}],
+            "@Microsoft.Dynamics.CRM.morerecords": False,
+        })
+        mock_od._request = AsyncMock(return_value=resp)
+
+        result = await async_client.query.fetchxml(_SIMPLE_FETCHXML).execute()
+
+        assert isinstance(result, QueryResult)
+        assert len(result) == 1
+        assert result[0]["name"] == "Contoso"
+
+    async def test_execute_pages_yields_pages(self, async_client, mock_od):
+        """AsyncFetchXmlQuery.execute_pages() yields one QueryResult per page."""
+        mock_od._entity_set_from_schema_name = AsyncMock(return_value="accounts")
+
+        resp = MagicMock()
+        resp.json = AsyncMock(return_value={
+            "value": [{"name": "Contoso", "accountid": "g1"}],
+            "@Microsoft.Dynamics.CRM.morerecords": False,
+        })
+        mock_od._request = AsyncMock(return_value=resp)
+
+        pages = []
+        async for page in async_client.query.fetchxml(_SIMPLE_FETCHXML).execute_pages():
+            pages.append(page)
+
+        assert len(pages) == 1
+        assert pages[0][0]["name"] == "Contoso"
 
 
 class TestAsyncQuerySql:

@@ -5,9 +5,14 @@
 
 from __future__ import annotations
 
+import xml.etree.ElementTree as _ET
 from typing import Any, Dict, List, TYPE_CHECKING
+from urllib.parse import quote as _url_quote
 
-from ...core.errors import MetadataError
+from ...core.errors import MetadataError, ValidationError
+from ..models.async_fetchxml_query import AsyncFetchXmlQuery
+from ..models.async_query_builder import AsyncQueryBuilder
+from ...models.fetchxml_query import _MAX_URL_LENGTH
 from ...models.record import Record
 
 if TYPE_CHECKING:
@@ -49,6 +54,104 @@ class AsyncQueryOperations:
 
     def __init__(self, client: "AsyncDataverseClient") -> None:
         self._client = client
+
+    # ----------------------------------------------------------------- builder
+
+    def builder(self, table: str) -> AsyncQueryBuilder:
+        """Create a fluent async query builder for the specified table.
+
+        Returns an :class:`~PowerPlatform.Dataverse.models.async_query_builder.AsyncQueryBuilder`
+        that can be chained with filter, select, and order methods, then
+        executed via ``await .execute()`` or iterated via ``async for`` with
+        ``.execute_pages()``.
+
+        :param table: Table schema name (e.g. ``"account"``).
+        :type table: :class:`str`
+        :return: An AsyncQueryBuilder instance bound to this client.
+        :rtype: ~PowerPlatform.Dataverse.models.async_query_builder.AsyncQueryBuilder
+
+        Example::
+
+            from PowerPlatform.Dataverse.models.filters import col
+
+            result = await (client.query.builder("account")
+                            .select("name", "revenue")
+                            .where(col("statecode") == 0)
+                            .order_by("revenue", descending=True)
+                            .top(100)
+                            .execute())
+            for record in result:
+                print(record["name"])
+
+            # Lazy paged iteration
+            async for page in (client.query.builder("account")
+                               .select("name")
+                               .execute_pages()):
+                process(page.to_dataframe())
+        """
+        qb = AsyncQueryBuilder(table)
+        qb._query_ops = self
+        return qb
+
+    # --------------------------------------------------------------- fetchxml
+
+    def fetchxml(self, xml: str) -> AsyncFetchXmlQuery:
+        """Return an inert :class:`~PowerPlatform.Dataverse.models.async_fetchxml_query.AsyncFetchXmlQuery` object.
+
+        No HTTP request is made until
+        :meth:`~PowerPlatform.Dataverse.models.async_fetchxml_query.AsyncFetchXmlQuery.execute`
+        or
+        :meth:`~PowerPlatform.Dataverse.models.async_fetchxml_query.AsyncFetchXmlQuery.execute_pages`
+        is called on the returned object.
+
+        :param xml: Well-formed FetchXML query string. The root ``<entity name="...">``
+            element determines the entity set endpoint.
+        :type xml: :class:`str`
+        :return: Inert async query object.
+        :rtype: :class:`~PowerPlatform.Dataverse.models.async_fetchxml_query.AsyncFetchXmlQuery`
+        :raises ValidationError: If the FetchXML is not a string, is empty, or exceeds the URL
+            length limit when encoded.
+        :raises ValueError: If the FetchXML is missing a root ``<entity>`` element or name.
+
+        Example::
+
+            query = client.query.fetchxml(\"\"\"
+              <fetch top="50">
+                <entity name="account">
+                  <attribute name="name" />
+                </entity>
+              </fetch>
+            \"\"\")
+
+            # Eager — all pages collected:
+            result = await query.execute()
+            df = result.to_dataframe()
+
+            # Lazy — one page at a time:
+            async for page in query.execute_pages():
+                process(page.to_dataframe())
+        """
+        if not isinstance(xml, str):
+            raise ValidationError("xml must be a string")
+        xml = xml.strip()
+        if not xml:
+            raise ValidationError("xml must not be empty")
+        if len(_url_quote(xml, safe="")) > _MAX_URL_LENGTH:
+            raise ValidationError(
+                f"FetchXML exceeds the Dataverse URL length limit ({_MAX_URL_LENGTH:,} characters) when encoded. "
+                "Use a $batch POST request to send FetchXML in the request body where the limit is 64 KB."
+            )
+        try:
+            root_el = _ET.fromstring(xml)
+        except _ET.ParseError as exc:
+            raise ValidationError(f"xml is not well-formed: {exc}") from exc
+        entity_el = root_el.find("entity")
+        if entity_el is None:
+            raise ValueError("FetchXML must contain an <entity> child element")
+        entity_name = entity_el.get("name", "")
+        if not entity_name:
+            raise ValueError("FetchXML <entity> element must have a 'name' attribute")
+        return AsyncFetchXmlQuery(xml, entity_name, self._client)
 
     # -------------------------------------------------------------------- sql
 

@@ -9,15 +9,34 @@ import aiohttp
 from PowerPlatform.Dataverse.aio.core._async_http import _AsyncHttpClient
 
 
-def _make_session(status: int = 200) -> MagicMock:
-    """Return a mock aiohttp.ClientSession whose request() returns a buffered response."""
-    session = MagicMock(spec=aiohttp.ClientSession)
-    resp = AsyncMock()
+def _make_resp(status: int = 200) -> MagicMock:
+    """Return a mock aiohttp.ClientResponse."""
+    resp = MagicMock()
     resp.status = status
     resp.headers = {}
     resp.read = AsyncMock(return_value=b"")
     resp.text = AsyncMock(return_value="")
-    session.request = AsyncMock(return_value=resp)
+    return resp
+
+
+def _make_cm(resp=None, exc=None) -> MagicMock:
+    """Return an async context manager mock.
+
+    If exc is given, __aenter__ raises it. Otherwise it returns resp.
+    """
+    cm = MagicMock()
+    if exc is not None:
+        cm.__aenter__ = AsyncMock(side_effect=exc)
+    else:
+        cm.__aenter__ = AsyncMock(return_value=resp)
+    cm.__aexit__ = AsyncMock(return_value=False)
+    return cm
+
+
+def _make_session(status: int = 200) -> MagicMock:
+    """Return a mock aiohttp.ClientSession whose request() is an async context manager."""
+    session = MagicMock(spec=aiohttp.ClientSession)
+    session.request = MagicMock(return_value=_make_cm(_make_resp(status)))
     return session
 
 
@@ -99,13 +118,11 @@ class TestAsyncHttpClientRetry:
     async def test_retries_on_client_error_and_succeeds(self):
         """Retries after a ClientError and returns response on second attempt."""
         session = MagicMock(spec=aiohttp.ClientSession)
-        good_resp = AsyncMock()
-        good_resp.status = 200
-        good_resp.headers = {}
-        good_resp.read = AsyncMock(return_value=b"")
-        good_resp.text = AsyncMock(return_value="")
-
-        session.request = AsyncMock(side_effect=[aiohttp.ClientConnectionError("timeout"), good_resp])
+        good_resp = _make_resp(200)
+        session.request = MagicMock(side_effect=[
+            _make_cm(exc=aiohttp.ClientConnectionError("timeout")),
+            _make_cm(good_resp),
+        ])
         client = _AsyncHttpClient(retries=2, backoff=0, session=session)
         with patch("asyncio.sleep", new_callable=AsyncMock):
             result = await client._request("get", "https://example.com/data")
@@ -116,7 +133,9 @@ class TestAsyncHttpClientRetry:
     async def test_raises_after_all_retries_exhausted(self):
         """Raises ClientError after all retry attempts fail."""
         session = MagicMock(spec=aiohttp.ClientSession)
-        session.request = AsyncMock(side_effect=aiohttp.ClientConnectionError("timeout"))
+        session.request = MagicMock(
+            return_value=_make_cm(exc=aiohttp.ClientConnectionError("timeout"))
+        )
         client = _AsyncHttpClient(retries=3, backoff=0, session=session)
         with patch("asyncio.sleep", new_callable=AsyncMock):
             with pytest.raises(aiohttp.ClientError):
@@ -125,19 +144,12 @@ class TestAsyncHttpClientRetry:
     async def test_backoff_delay_between_retries(self):
         """Sleeps with exponential backoff between retry attempts."""
         session = MagicMock(spec=aiohttp.ClientSession)
-        good_resp = AsyncMock()
-        good_resp.status = 200
-        good_resp.headers = {}
-        good_resp.read = AsyncMock(return_value=b"")
-        good_resp.text = AsyncMock(return_value="")
-
-        session.request = AsyncMock(
-            side_effect=[
-                aiohttp.ClientConnectionError(),
-                aiohttp.ClientConnectionError(),
-                good_resp,
-            ]
-        )
+        good_resp = _make_resp(200)
+        session.request = MagicMock(side_effect=[
+            _make_cm(exc=aiohttp.ClientConnectionError()),
+            _make_cm(exc=aiohttp.ClientConnectionError()),
+            _make_cm(good_resp),
+        ])
         client = _AsyncHttpClient(retries=3, backoff=1.0, session=session)
         with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
             await client._request("get", "https://example.com/data")
@@ -150,6 +162,22 @@ class TestAsyncHttpClientRetry:
         client = _AsyncHttpClient(retries=5, backoff=0, session=session)
         await client._request("get", "https://example.com/data")
         assert session.request.call_count == 1
+
+    async def test_retries_on_timeout_error(self):
+        """Retries on asyncio.TimeoutError (not a subclass of aiohttp.ClientError)."""
+        import asyncio
+        session = MagicMock(spec=aiohttp.ClientSession)
+        good_resp = _make_resp(200)
+        session.request = MagicMock(side_effect=[
+            _make_cm(exc=asyncio.TimeoutError()),
+            _make_cm(good_resp),
+        ])
+        client = _AsyncHttpClient(retries=2, backoff=0, session=session)
+        with patch("asyncio.sleep", new_callable=AsyncMock):
+            result = await client._request("get", "https://example.com/data")
+
+        assert session.request.call_count == 2
+        assert result is good_resp
 
 
 class TestAsyncHttpClientClose:
@@ -194,15 +222,58 @@ class TestAsyncHttpClientLogger:
     async def test_error_logged_on_retry(self):
         """Transport errors are logged before each retry."""
         session = MagicMock(spec=aiohttp.ClientSession)
-        good_resp = AsyncMock()
-        good_resp.status = 200
-        good_resp.headers = {}
-        good_resp.read = AsyncMock(return_value=b"")
-        good_resp.text = AsyncMock(return_value="")
-        session.request = AsyncMock(side_effect=[aiohttp.ClientConnectionError(), good_resp])
+        good_resp = _make_resp(200)
+        session.request = MagicMock(side_effect=[
+            _make_cm(exc=aiohttp.ClientConnectionError()),
+            _make_cm(good_resp),
+        ])
         mock_logger = MagicMock()
         mock_logger.body_logging_enabled = False
         client = _AsyncHttpClient(retries=2, backoff=0, session=session, logger=mock_logger)
         with patch("asyncio.sleep", new_callable=AsyncMock):
             await client._request("get", "https://example.com/data")
         mock_logger.log_error.assert_called_once()
+
+    async def test_request_body_logged_from_json_kwarg(self):
+        """json= kwarg body is extracted and passed to log_request."""
+        session = _make_session()
+        mock_logger = MagicMock()
+        mock_logger.body_logging_enabled = False
+        client = _AsyncHttpClient(retries=1, session=session, logger=mock_logger)
+        await client._request("post", "https://example.com/data", json={"key": "value"})
+        _, log_kwargs = mock_logger.log_request.call_args
+        assert log_kwargs["body"] == {"key": "value"}
+
+    async def test_request_body_logged_from_data_kwarg(self):
+        """data= kwarg body is extracted when json= is absent."""
+        session = _make_session()
+        mock_logger = MagicMock()
+        mock_logger.body_logging_enabled = False
+        client = _AsyncHttpClient(retries=1, session=session, logger=mock_logger)
+        await client._request("post", "https://example.com/data", data=b"raw bytes")
+        _, log_kwargs = mock_logger.log_request.call_args
+        assert log_kwargs["body"] == b"raw bytes"
+
+    async def test_response_body_decoded_when_body_logging_enabled(self):
+        """When body_logging_enabled=True, resp.text() is awaited and passed to log_response."""
+        session = _make_session()
+        session.request.return_value.__aenter__.return_value.text = AsyncMock(return_value='{"ok": true}')
+        mock_logger = MagicMock()
+        mock_logger.body_logging_enabled = True
+        client = _AsyncHttpClient(retries=1, session=session, logger=mock_logger)
+        await client._request("get", "https://example.com/data")
+        _, log_kwargs = mock_logger.log_response.call_args
+        assert log_kwargs["body"] == '{"ok": true}'
+
+    async def test_response_body_decode_error_is_swallowed(self):
+        """If resp.text() raises, body is None and log_response is still called."""
+        session = _make_session()
+        session.request.return_value.__aenter__.return_value.text = AsyncMock(
+            side_effect=UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+        )
+        mock_logger = MagicMock()
+        mock_logger.body_logging_enabled = True
+        client = _AsyncHttpClient(retries=1, session=session, logger=mock_logger)
+        await client._request("get", "https://example.com/data")
+        _, log_kwargs = mock_logger.log_response.call_args
+        assert log_kwargs["body"] is None

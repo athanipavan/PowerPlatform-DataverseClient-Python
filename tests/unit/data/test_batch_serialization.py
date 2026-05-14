@@ -630,7 +630,6 @@ class TestBatchRecordOperationsUpsert(unittest.TestCase):
         return BatchRecordOperations(batch), batch
 
     def test_upsert_single_upsert_item_appended(self):
-        from PowerPlatform.Dataverse.operations.batch import BatchRecordOperations
 
         rec_ops, batch = self._make_batch()
         item = UpsertItem(alternate_key={"accountnumber": "ACC-001"}, record={"name": "Contoso"})
@@ -644,7 +643,6 @@ class TestBatchRecordOperationsUpsert(unittest.TestCase):
         self.assertEqual(intent.items[0].alternate_key, {"accountnumber": "ACC-001"})
 
     def test_upsert_plain_dict_normalised_to_upsert_item(self):
-        from PowerPlatform.Dataverse.operations.batch import BatchRecordOperations
 
         rec_ops, batch = self._make_batch()
         rec_ops.upsert("account", [{"alternate_key": {"accountnumber": "X"}, "record": {"name": "Y"}}])
@@ -654,21 +652,18 @@ class TestBatchRecordOperationsUpsert(unittest.TestCase):
         self.assertEqual(intent.items[0].record, {"name": "Y"})
 
     def test_upsert_empty_list_raises(self):
-        from PowerPlatform.Dataverse.operations.batch import BatchRecordOperations
 
         rec_ops, _ = self._make_batch()
         with self.assertRaises(TypeError):
             rec_ops.upsert("account", [])
 
     def test_upsert_invalid_item_raises(self):
-        from PowerPlatform.Dataverse.operations.batch import BatchRecordOperations
 
         rec_ops, _ = self._make_batch()
         with self.assertRaises(TypeError):
             rec_ops.upsert("account", ["not_a_valid_item"])
 
     def test_upsert_multiple_items_all_normalised(self):
-        from PowerPlatform.Dataverse.operations.batch import BatchRecordOperations
 
         rec_ops, batch = self._make_batch()
         rec_ops.upsert(

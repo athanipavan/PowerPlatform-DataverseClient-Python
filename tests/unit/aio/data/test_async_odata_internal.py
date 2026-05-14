@@ -1342,3 +1342,454 @@ class TestRequestMetadataWithRetry:
             with pytest.raises(RuntimeError, match="Metadata request failed"):
                 await client._request_metadata_with_retry("get", "https://example/url")
         assert client._request.call_count == 5  # max_attempts defined in implementation
+
+
+# ---------------------------------------------------------------------------
+# Additional coverage tests
+# ---------------------------------------------------------------------------
+
+
+class TestRequestMergeAndEdgeCases:
+    """Coverage for _request() header-merge, text-decode failure, and Retry-After edge cases."""
+
+    def _auth_client(self):
+        auth = MagicMock()
+        auth._acquire_token = AsyncMock(return_value=MagicMock(access_token="token"))
+        return _AsyncODataClient(auth, "https://example.crm.dynamics.com")
+
+    async def test_caller_headers_merged_with_base_headers(self):
+        """Headers passed by the caller are merged on top of base headers."""
+        client = self._auth_client()
+        client._raw_request = AsyncMock(return_value=_resp(status=200, json_data={}))
+        await client._request("get", "https://example.crm.dynamics.com/api/data/v9.2/accounts",
+                               headers={"X-Custom": "value"})
+        _, kwargs = client._raw_request.call_args
+        assert kwargs.get("headers", {}).get("X-Custom") == "value"
+        assert "Authorization" in kwargs.get("headers", {})
+
+    async def test_text_decode_failure_still_raises_http_error(self):
+        """When r.text() raises, _request still raises HttpError (not the decode exception)."""
+        client = self._auth_client()
+        r = MagicMock()
+        r.status = 400
+        r.headers = {}
+        r.text = AsyncMock(side_effect=UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid"))
+        client._raw_request = AsyncMock(return_value=r)
+        with pytest.raises(HttpError) as exc:
+            await client._request("get", "https://example.crm.dynamics.com/api/data/v9.2/accounts")
+        assert exc.value.status_code == 400
+
+    async def test_retry_after_non_integer_handled(self):
+        """A non-integer Retry-After header (e.g. HTTP-date) does not crash _request."""
+        client = self._auth_client()
+        body = {"error": {"code": "429", "message": "Too many requests"}}
+        r = _resp(status=429, json_data=body, headers={"Retry-After": "Wed, 21 Oct 2025 07:28:00 GMT"})
+        client._raw_request = AsyncMock(return_value=r)
+        with pytest.raises(HttpError) as exc:
+            await client._request("get", "https://example.crm.dynamics.com/api/data/v9.2/accounts")
+        assert exc.value.to_dict()["details"].get("retry_after") is None
+
+
+class TestCreateMultipleEdgeCases:
+    """Coverage for _create_multiple() JSON-parse and non-dict body paths."""
+
+    async def test_json_parse_failure_returns_empty_list(self):
+        """When response JSON cannot be parsed, returns empty list without raising."""
+        import aiohttp
+        client = _make_client()
+        _seed_cache(client)
+        r = MagicMock()
+        r.status = 200
+        r.headers = {}
+        r.json = AsyncMock(side_effect=aiohttp.ContentTypeError(MagicMock(), MagicMock()))
+        r.read = AsyncMock(return_value=b"")
+        r.text = AsyncMock(return_value="")
+        client._request.return_value = r
+        result = await client._create_multiple("accounts", "account", [{"amount": 1}])
+        assert result == []
+
+    async def test_non_dict_body_returns_empty_list(self):
+        """When response body is a list (not dict), returns empty list."""
+        client = _make_client()
+        _seed_cache(client)
+        client._request.return_value = _resp(json_data=[1, 2, 3], status=200)
+        result = await client._create_multiple("accounts", "account", [{"amount": 1}])
+        assert result == []
+
+
+class TestGetMultipleEdgeCases:
+    """Coverage for _get_multiple() JSON-parse failure path."""
+
+    async def test_json_parse_failure_returns_empty_page(self):
+        """When _do_request JSON parse fails, an empty dict is returned (no crash)."""
+        import aiohttp
+        client = _make_client()
+        _seed_cache(client)
+        r = MagicMock()
+        r.status = 200
+        r.headers = {}
+        r.json = AsyncMock(side_effect=aiohttp.ContentTypeError(MagicMock(), MagicMock()))
+        r.read = AsyncMock(return_value=b"")
+        client._request.return_value = r
+        pages = [page async for page in client._get_multiple("account")]
+        assert pages == []
+
+
+class TestQuerySqlEdgeCases:
+    """Coverage for _query_sql() JSON-parse, non-dict body, and pagination error paths."""
+
+    async def test_json_parse_failure_returns_empty_list(self):
+        """When JSON parse fails on first response, returns empty list."""
+        import aiohttp
+        client = _make_client()
+        _seed_cache(client)
+        r = MagicMock()
+        r.status = 200
+        r.headers = {}
+        r.json = AsyncMock(side_effect=aiohttp.ContentTypeError(MagicMock(), MagicMock()))
+        r.read = AsyncMock(return_value=b"")
+        client._request.return_value = r
+        result = await client._query_sql("SELECT name FROM account")
+        assert result == []
+
+    async def test_non_dict_body_returns_empty_list(self):
+        """When response body is not a dict (e.g. bare list of non-dicts), returns []."""
+        client = _make_client()
+        _seed_cache(client)
+        client._request.return_value = _resp(json_data="not-a-dict", status=200)
+        result = await client._query_sql("SELECT name FROM account")
+        assert result == []
+
+    async def test_pagination_duplicate_cookie_warns_and_stops(self):
+        """Duplicate pagingcookie in $skiptoken triggers RuntimeWarning and stops pagination."""
+        import warnings
+        from urllib.parse import quote
+        client = _make_client()
+        _seed_cache(client)
+        # Build two skiptokens with the same pagingcookie value but different pagenumbers.
+        # _extract_pagingcookie extracts the pagingcookie= attribute value; if it's the
+        # same in both pages, the duplicate-cookie guard fires.
+        cookie_val = "%3Ccookie+guid%3D%22abc%22%3E"  # same encoded cookie in both pages
+        outer1 = f'<cookie pagenumber="1" pagingcookie="{cookie_val}" />'
+        outer2 = f'<cookie pagenumber="2" pagingcookie="{cookie_val}" />'
+        next_link1 = f"https://example.crm.dynamics.com/api/data/v9.2/accounts?$skiptoken={quote(outer1)}"
+        next_link2 = f"https://example.crm.dynamics.com/api/data/v9.2/accounts?$skiptoken={quote(outer2)}"
+        page1 = _resp(json_data={
+            "value": [{"name": "A", "accountid": "g1"}],
+            "@odata.nextLink": next_link1,
+        }, status=200)
+        page2 = _resp(json_data={
+            "value": [{"name": "B", "accountid": "g2"}],
+            "@odata.nextLink": next_link2,
+        }, status=200)
+        client._request.side_effect = [page1, page2]
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            result = await client._query_sql("SELECT name FROM account")
+        assert any("pagingcookie" in str(warning.message) for warning in w)
+        assert len(result) >= 1
+
+    async def test_pagination_next_page_request_fails_warns_and_stops(self):
+        """When the next-page request raises, a RuntimeWarning is emitted and pagination stops."""
+        import warnings
+        client = _make_client()
+        _seed_cache(client)
+        next_link = "https://example.crm.dynamics.com/api/data/v9.2/accounts?$skiptoken=abc"
+        page1 = _resp(json_data={
+            "value": [{"name": "A", "accountid": "g1"}],
+            "@odata.nextLink": next_link,
+        }, status=200)
+        client._request.side_effect = [page1, HttpError("server error", status_code=500)]
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            result = await client._query_sql("SELECT name FROM account")
+        assert any("next-page request failed" in str(warning.message) for warning in w)
+        assert result == [{"name": "A", "accountid": "g1"}]
+
+    async def test_pagination_next_page_non_json_warns_and_stops(self):
+        """When the next-page response is not JSON, a RuntimeWarning is emitted."""
+        import aiohttp
+        import warnings
+        client = _make_client()
+        _seed_cache(client)
+        next_link = "https://example.crm.dynamics.com/api/data/v9.2/accounts?$skiptoken=abc"
+        page1 = _resp(json_data={
+            "value": [{"name": "A", "accountid": "g1"}],
+            "@odata.nextLink": next_link,
+        }, status=200)
+        bad_resp = MagicMock()
+        bad_resp.status = 200
+        bad_resp.headers = {}
+        bad_resp.json = AsyncMock(side_effect=aiohttp.ContentTypeError(MagicMock(), MagicMock()))
+        bad_resp.read = AsyncMock(return_value=b"")
+        client._request.side_effect = [page1, bad_resp]
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            result = await client._query_sql("SELECT name FROM account")
+        assert any("not valid JSON" in str(warning.message) for warning in w)
+        assert result == [{"name": "A", "accountid": "g1"}]
+
+    async def test_pagination_non_dict_page_body_stops(self):
+        """When a paginated response body is not a dict, pagination stops cleanly."""
+        client = _make_client()
+        _seed_cache(client)
+        next_link = "https://example.crm.dynamics.com/api/data/v9.2/accounts?$skiptoken=abc"
+        page1 = _resp(json_data={
+            "value": [{"name": "A", "accountid": "g1"}],
+            "@odata.nextLink": next_link,
+        }, status=200)
+        page2 = _resp(json_data="not-a-dict", status=200)
+        client._request.side_effect = [page1, page2]
+        result = await client._query_sql("SELECT name FROM account")
+        assert result == [{"name": "A", "accountid": "g1"}]
+
+
+class TestPrimaryIdAttrEdgeCases:
+    """Coverage for _primary_id_attr() RuntimeError when metadata lacks PrimaryIdAttribute."""
+
+    async def test_raises_when_pk_not_in_cache_after_metadata_fetch(self):
+        """RuntimeError raised when entity resolves but PrimaryIdAttribute is absent from cache."""
+        client = _make_client()
+        # Populate entity set cache but NOT the primaryid cache
+        key = client._normalize_cache_key("account")
+        client._logical_to_entityset_cache[key] = "accounts"
+        # _entity_set_from_schema_name will hit the cache and return without populating primaryid
+        with pytest.raises(RuntimeError, match="PrimaryIdAttribute not resolved"):
+            await client._primary_id_attr("account")
+
+
+class TestGetAttributeMetadataEdgeCases:
+    """Coverage for _get_attribute_metadata() skip and JSON-parse-failure paths."""
+
+    async def test_skips_at_sign_fields_in_extra_select(self):
+        """Fields starting with '@' in extra_select are silently ignored."""
+        client = _make_client()
+        client._request.return_value = _resp(
+            json_data={"value": [{"MetadataId": "m1", "LogicalName": "name", "SchemaName": "Name"}]},
+            status=200,
+        )
+        result = await client._get_attribute_metadata("meta-1", "name", extra_select="@odata.type,AttributeType")
+        assert result is not None
+        assert result["LogicalName"] == "name"
+
+    async def test_json_parse_failure_returns_none(self):
+        """When response JSON parse fails, None is returned without raising."""
+        import aiohttp
+        client = _make_client()
+        r = MagicMock()
+        r.status = 200
+        r.headers = {}
+        r.json = AsyncMock(side_effect=aiohttp.ContentTypeError(MagicMock(), MagicMock()))
+        r.read = AsyncMock(return_value=b"")
+        client._request.return_value = r
+        result = await client._get_attribute_metadata("meta-1", "name")
+        assert result is None
+
+
+class TestPicklistEdgeCases:
+    """Coverage for _bulk_fetch_picklists() guard clauses and _convert_labels_to_ints() paths."""
+
+    async def test_bulk_fetch_cache_hit_inside_lock_skips_fetch(self):
+        """Second TTL check inside the lock exits early when another coroutine populated cache."""
+        import time
+        client = _make_client()
+        key = client._normalize_cache_key("account")
+        # Pre-populate cache with a fresh entry (TTL not expired)
+        client._picklist_label_cache[key] = {"ts": time.time(), "picklists": {}}
+        # Warm the outer cache check too
+        client._picklist_label_cache[key]["ts"] = time.time()
+        # Should return without calling _request
+        await client._bulk_fetch_picklists("account")
+        client._request_metadata_with_retry = AsyncMock()
+        client._request_metadata_with_retry.assert_not_called()
+
+    async def test_bulk_fetch_skips_non_dict_items(self):
+        """Non-dict items in the picklist response value list are skipped."""
+        client = _make_client()
+        r = _resp(json_data={"value": ["not-a-dict", {"LogicalName": "status", "OptionSet": {"Options": []}}]})
+        client._request_metadata_with_retry = AsyncMock(return_value=r)
+        await client._bulk_fetch_picklists("account")  # should not raise
+
+    async def test_bulk_fetch_skips_empty_logical_name(self):
+        """Items with empty LogicalName are skipped during picklist fetch."""
+        client = _make_client()
+        r = _resp(json_data={"value": [{"LogicalName": "", "OptionSet": {"Options": []}}]})
+        client._request_metadata_with_retry = AsyncMock(return_value=r)
+        await client._bulk_fetch_picklists("account")  # should not raise
+
+    async def test_bulk_fetch_skips_non_dict_options(self):
+        """Non-dict entries in OptionSet.Options are skipped."""
+        client = _make_client()
+        r = _resp(json_data={"value": [{"LogicalName": "status", "OptionSet": {"Options": ["bad"]}}]})
+        client._request_metadata_with_retry = AsyncMock(return_value=r)
+        await client._bulk_fetch_picklists("account")  # should not raise
+
+    async def test_bulk_fetch_skips_non_int_value(self):
+        """Options whose Value is not an int are skipped."""
+        client = _make_client()
+        r = _resp(json_data={"value": [{
+            "LogicalName": "status",
+            "OptionSet": {"Options": [{"Value": "not-an-int", "Label": {}}]},
+        }]})
+        client._request_metadata_with_retry = AsyncMock(return_value=r)
+        await client._bulk_fetch_picklists("account")  # should not raise
+
+    async def test_convert_labels_non_dict_cache_entry_returns_record(self):
+        """When picklist cache entry is not a dict, record is returned unchanged."""
+        client = _make_client()
+        key = client._normalize_cache_key("account")
+        client._picklist_label_cache[key] = "not-a-dict"
+        result = await client._convert_labels_to_ints("account", {"status": "Active"})
+        assert result == {"status": "Active"}
+
+    async def test_convert_labels_skips_odata_annotation_keys(self):
+        """Keys containing '@odata.' are not looked up in the picklist cache."""
+        import time
+        client = _make_client()
+        key = client._normalize_cache_key("account")
+        client._picklist_label_cache[key] = {
+            "ts": time.time(),
+            "picklists": {"status": {"active": 1}},
+        }
+        record = {"status": "active", "status@odata.type": "#Microsoft.Dynamics.CRM.StatusType"}
+        result = await client._convert_labels_to_ints("account", record)
+        # status resolved; odata annotation key left untouched
+        assert result["status"] == 1
+        assert "status@odata.type" in result
+
+
+class TestCreateEntityEdgeCases:
+    """Coverage for _create_entity() solution_name, missing EntitySetName, missing MetadataId."""
+
+    async def test_create_entity_with_solution_unique_name(self):
+        """solution_unique_name is passed as a query parameter to the POST request."""
+        client = _make_client()
+        client._request.return_value = _resp(status=204)
+        entity_resp = {
+            "LogicalName": "new_table",
+            "EntitySetName": "new_tables",
+            "MetadataId": "meta-999",
+            "SchemaName": "new_table",
+            "PrimaryIdAttribute": "new_tableid",
+        }
+        client._get_entity_by_table_schema_name = AsyncMock(return_value=entity_resp)
+        result = await client._create_entity(
+            "new_table", "New Table", [],
+            solution_unique_name="MySolution",
+        )
+        _, kwargs = client._request.call_args
+        assert kwargs.get("params", {}).get("SolutionUniqueName") == "MySolution"
+        assert result["EntitySetName"] == "new_tables"
+
+    async def test_create_entity_missing_entity_set_name_raises(self):
+        """RuntimeError raised when EntitySetName is absent after create."""
+        client = _make_client()
+        client._request.return_value = _resp(status=204)
+        client._get_entity_by_table_schema_name = AsyncMock(return_value={"MetadataId": "m1"})
+        with pytest.raises(RuntimeError, match="EntitySetName not available"):
+            await client._create_entity("t", "t", "T", [])
+
+    async def test_create_entity_missing_metadata_id_raises(self):
+        """RuntimeError raised when MetadataId is absent after create."""
+        client = _make_client()
+        client._request.return_value = _resp(status=204)
+        client._get_entity_by_table_schema_name = AsyncMock(
+            return_value={"EntitySetName": "ts", "LogicalName": "t"}
+        )
+        with pytest.raises(RuntimeError, match="MetadataId missing"):
+            await client._create_entity("t", "t", "T", [])
+
+
+class TestWaitForAttributeVisibilityWithDelay:
+    """Coverage for _wait_for_attribute_visibility() sleep branch."""
+
+    async def test_waits_when_delay_is_nonzero(self):
+        """asyncio.sleep is called when the computed delay is positive."""
+        client = _make_client()
+        # First call (delay=0) fails so the loop continues to delay=1 where sleep fires.
+        ok = _resp(status=200)
+        client._request.side_effect = [HttpError("not yet", status_code=404), ok]
+        with patch("PowerPlatform.Dataverse.aio.data._async_odata.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+            await client._wait_for_attribute_visibility("accounts", "new_col", delays=(0, 1))
+        mock_sleep.assert_called_once_with(1)
+
+
+class TestAlternateKeyWithDisplayName:
+    """Coverage for _create_alternate_key() display_name_label path."""
+
+    async def test_create_alternate_key_with_display_name(self):
+        """DisplayName payload key is set when display_name_label is provided."""
+        client = _make_client()
+        ent = {"LogicalName": "account", "EntitySetName": "accounts", "MetadataId": "m1", "SchemaName": "Account"}
+        client._get_entity_by_table_schema_name = AsyncMock(return_value=ent)
+        r = _resp(status=204, headers={"OData-EntityId": "https://example.com/(key123)"})
+        r.headers = {"OData-EntityId": "https://example.com/(key123)"}
+        client._request.return_value = r
+
+        label = MagicMock()
+        label.to_dict.return_value = {"UserLocalizedLabel": {"Label": "Account Number", "LanguageCode": 1033}}
+
+        result = await client._create_alternate_key("account", "AccountNumber_AK", ["accountnumber"], label)
+        assert result["schema_name"] == "AccountNumber_AK"
+        _, kwargs = client._request.call_args
+        assert "DisplayName" in kwargs.get("json", {})
+
+
+class TestBuildMethodsAdditional:
+    """Coverage for _build_create_multiple TypeError, _build_get annotations, and _build_list."""
+
+    async def test_build_create_multiple_non_dict_raises_type_error(self):
+        """_build_create_multiple() raises TypeError when records contain non-dicts."""
+        client = _make_client()
+        _seed_cache(client)
+        with pytest.raises(TypeError, match="dicts"):
+            await client._build_create_multiple("accounts", "account", ["not-a-dict"])
+
+    async def test_build_get_with_include_annotations(self):
+        """_build_get() sets Prefer header when include_annotations is specified."""
+        client = _make_client()
+        _seed_cache(client)
+        req = await client._build_get("account", "guid-1", include_annotations="*")
+        assert req.headers is not None
+        assert "odata.include-annotations" in req.headers.get("Prefer", "")
+
+    async def test_build_list_basic(self):
+        """_build_list() produces a GET request targeting the entity-set URL."""
+        client = _make_client()
+        _seed_cache(client)
+        req = await client._build_list("account")
+        assert req.method == "GET"
+        assert "accounts" in req.url
+        assert req.headers is None
+
+    async def test_build_list_with_select_filter_orderby_top(self):
+        """_build_list() encodes all OData query parameters into the URL."""
+        client = _make_client()
+        _seed_cache(client)
+        req = await client._build_list(
+            "account",
+            select=["name", "telephone1"],
+            filter="statecode eq 0",
+            orderby=["name asc"],
+            top=10,
+        )
+        assert "$select=name,telephone1" in req.url
+        assert "$filter=statecode+eq+0" in req.url or "$filter=statecode%20eq%200" in req.url or "statecode" in req.url
+        assert "$top=10" in req.url
+
+    async def test_build_list_with_page_size_and_annotations(self):
+        """_build_list() sets Prefer header for page_size and include_annotations."""
+        client = _make_client()
+        _seed_cache(client)
+        req = await client._build_list("account", page_size=50, include_annotations="*")
+        assert req.headers is not None
+        prefer = req.headers.get("Prefer", "")
+        assert "odata.maxpagesize=50" in prefer
+        assert "odata.include-annotations" in prefer
+
+    async def test_build_list_with_count(self):
+        """_build_list() appends $count=true when count=True."""
+        client = _make_client()
+        _seed_cache(client)
+        req = await client._build_list("account", count=True)
+        assert "$count=true" in req.url

@@ -1,8 +1,6 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
 
-import pytest
-from unittest.mock import AsyncMock
 
 from PowerPlatform.Dataverse.aio.operations.async_tables import AsyncTableOperations
 from PowerPlatform.Dataverse.models.relationship import RelationshipInfo

@@ -141,7 +141,7 @@ class _AsyncODataClient(_AsyncFileUploadMixin, _AsyncRelationshipOperationsMixin
         if r.status in request_context.expected:
             return r
 
-        response_headers = dict(r.headers) if r.headers else {}
+        response_headers = getattr(r, "headers", {}) or {}
         raw_text = ""
         try:
             raw_text = await r.text()
@@ -368,9 +368,7 @@ class _AsyncODataClient(_AsyncFileUploadMixin, _AsyncRelationshipOperationsMixin
             )
         logical_name = table_schema_name.lower()
         lowered_records = [self._lowercase_keys(r) for r in records]
-        converted = await asyncio.gather(*[
-            self._convert_labels_to_ints(table_schema_name, r) for r in lowered_records
-        ])
+        converted = [await self._convert_labels_to_ints(table_schema_name, r) for r in lowered_records]
         targets: List[Dict[str, Any]] = []
         for alt_key, record_processed in zip(alternate_keys, converted):
             alt_key_lower = self._lowercase_keys(alt_key)
@@ -1477,10 +1475,10 @@ class _AsyncODataClient(_AsyncFileUploadMixin, _AsyncRelationshipOperationsMixin
         deleted: List[str] = []
         needs_picklist_flush = False
 
-        attr_metas = await asyncio.gather(*[
-            self._get_attribute_metadata(metadata_id, col, extra_select="@odata.type,AttributeType")
+        attr_metas = [
+            await self._get_attribute_metadata(metadata_id, col, extra_select="@odata.type,AttributeType")
             for col in names
-        ])
+        ]
         for column_name, attr_meta in zip(names, attr_metas):
             if not attr_meta:
                 raise MetadataError(
@@ -1538,7 +1536,7 @@ class _AsyncODataClient(_AsyncFileUploadMixin, _AsyncRelationshipOperationsMixin
             raise TypeError("All items for multi-create must be dicts")
         logical_name = table.lower()
         lowered = [self._lowercase_keys(r) for r in records]
-        converted = await asyncio.gather(*[self._convert_labels_to_ints(table, r) for r in lowered])
+        converted = [await self._convert_labels_to_ints(table, r) for r in lowered]
         enriched = [
             {**r, "@odata.type": f"Microsoft.Dynamics.CRM.{logical_name}"} if "@odata.type" not in r else r
             for r in converted
@@ -1591,7 +1589,7 @@ class _AsyncODataClient(_AsyncFileUploadMixin, _AsyncRelationshipOperationsMixin
         """
         logical_name = table.lower()
         lowered = [self._lowercase_keys(r) for r in records]
-        converted = await asyncio.gather(*[self._convert_labels_to_ints(table, r) for r in lowered])
+        converted = [await self._convert_labels_to_ints(table, r) for r in lowered]
         enriched = [
             {**r, "@odata.type": f"Microsoft.Dynamics.CRM.{logical_name}"} if "@odata.type" not in r else r
             for r in converted
@@ -1661,7 +1659,7 @@ class _AsyncODataClient(_AsyncFileUploadMixin, _AsyncRelationshipOperationsMixin
             )
         logical_name = table.lower()
         lowered_records = [self._lowercase_keys(r) for r in records]
-        converted = await asyncio.gather(*[self._convert_labels_to_ints(table, r) for r in lowered_records])
+        converted = [await self._convert_labels_to_ints(table, r) for r in lowered_records]
         targets: List[Dict[str, Any]] = []
         for alt_key, record_processed in zip(alternate_keys, converted):
             alt_key_lower = self._lowercase_keys(alt_key)

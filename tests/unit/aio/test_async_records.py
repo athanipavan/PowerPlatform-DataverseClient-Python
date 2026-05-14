@@ -3,7 +3,7 @@
 
 import warnings
 import pytest
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 from PowerPlatform.Dataverse.aio.operations.async_records import AsyncRecordOperations
 from PowerPlatform.Dataverse.core.errors import HttpError

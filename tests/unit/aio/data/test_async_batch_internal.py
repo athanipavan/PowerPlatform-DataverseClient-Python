@@ -3,7 +3,6 @@
 
 """Unit tests for _AsyncBatchClient internals."""
 
-import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest

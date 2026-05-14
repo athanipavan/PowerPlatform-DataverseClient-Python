@@ -112,16 +112,19 @@ class _AsyncHttpClient:
         for attempt in range(self.max_attempts):
             try:
                 t0 = time.monotonic()
-                resp = await self._session.request(method, url, **kwargs)
-                # Buffer the full body so the caller can read it freely after this call
-                # returns, and so the connection is released back to the pool.
-                await resp.read()
+                async with self._session.request(method, url, **kwargs) as resp:
+                    await resp.read()
                 elapsed_ms = (time.monotonic() - t0) * 1000
 
                 if self._logger is not None:
                     # Only decode resp.text when body logging is enabled — avoids
                     # unnecessary overhead for large payloads when max_body_bytes == 0.
-                    resp_body = await resp.text() if self._logger.body_logging_enabled else None
+                    resp_body = None
+                    if self._logger.body_logging_enabled:
+                        try:
+                            resp_body = await resp.text()
+                        except Exception:
+                            pass
                     self._logger.log_response(
                         method,
                         url,
@@ -131,7 +134,7 @@ class _AsyncHttpClient:
                         elapsed_ms=elapsed_ms,
                     )
                 return resp
-            except aiohttp.ClientError as exc:
+            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
                 if self._logger is not None:
                     self._logger.log_error(
                         method,

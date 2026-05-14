@@ -3,7 +3,7 @@
 
 import pytest
 from contextlib import asynccontextmanager
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 from azure.core.credentials_async import AsyncTokenCredential
 
@@ -365,4 +365,157 @@ class TestAsyncQueryOdataExpands:
 
         result = await async_client.query.odata_expands("contact")
         assert result == []
+
+    async def test_odata_expands_handles_entity_set_resolution_failure(self, async_client, mock_od):
+        """odata_expands() sets target_entity_set to '' when resolution raises."""
+        from PowerPlatform.Dataverse.core.errors import MetadataError
+        mock_od._list_table_relationships.return_value = [
+            {
+                "ReferencingEntity": "contact",
+                "ReferencingEntityNavigationPropertyName": "parentcustomerid_account",
+                "ReferencedEntity": "account",
+                "ReferencingAttribute": "parentcustomerid",
+                "SchemaName": "contact_customer_accounts",
+            }
+        ]
+        mock_od._entity_set_from_schema_name.side_effect = MetadataError("not found")
+
+        result = await async_client.query.odata_expands("contact")
+
+        assert len(result) == 1
+        assert result[0]["target_entity_set"] == ""
+
+
+class TestAsyncFetchXmlQueryFactoryUrlLength:
+    def test_fetchxml_url_too_long_raises(self, async_client):
+        """fetchxml() raises ValidationError when encoded XML exceeds the URL length limit."""
+        from PowerPlatform.Dataverse.core.errors import ValidationError
+        # Build XML long enough to exceed _MAX_URL_LENGTH when encoded
+        long_xml = '<fetch><entity name="account">' + '<attribute name="x"/>' * 1200 + '</entity></fetch>'
+        with pytest.raises(ValidationError, match="URL length limit"):
+            async_client.query.fetchxml(long_xml)
+
+
+class TestAsyncFetchXmlQueryPaging:
+    """Tests for multi-page FetchXML execution paths."""
+
+    async def test_execute_multi_page_with_cookie(self, async_client, mock_od):
+        """execute() follows paging cookies across multiple pages."""
+        import urllib.parse
+
+        mock_od._entity_set_from_schema_name = AsyncMock(return_value="accounts")
+
+        inner = '<cookie page="1"><accountid last="g1" first="g1" /></cookie>'
+        encoded = urllib.parse.quote(urllib.parse.quote(inner))
+        paging_cookie = f'<cookie pagenumber="2" pagingcookie="{encoded}" istracking="false" />'
+
+        page1 = MagicMock()
+        page1.json = AsyncMock(return_value={
+            "value": [{"name": "Contoso", "accountid": "g1"}],
+            "@Microsoft.Dynamics.CRM.morerecords": True,
+            "@Microsoft.Dynamics.CRM.fetchxmlpagingcookie": paging_cookie,
+        })
+        page2 = MagicMock()
+        page2.json = AsyncMock(return_value={
+            "value": [{"name": "Fabrikam", "accountid": "g2"}],
+            "@Microsoft.Dynamics.CRM.morerecords": False,
+        })
+        mock_od._request = AsyncMock(side_effect=[page1, page2])
+
+        result = await async_client.query.fetchxml(_SIMPLE_FETCHXML).execute()
+
+        assert len(result) == 2
+        assert result[0]["name"] == "Contoso"
+        assert result[1]["name"] == "Fabrikam"
+
+    async def test_execute_multi_page_cookie_parse_error_fallback(self, async_client, mock_od):
+        """execute() falls back to simple paging when the cookie XML is malformed."""
+        import warnings
+
+        mock_od._entity_set_from_schema_name = AsyncMock(return_value="accounts")
+
+        page1 = MagicMock()
+        page1.json = AsyncMock(return_value={
+            "value": [{"name": "Contoso", "accountid": "g1"}],
+            "@Microsoft.Dynamics.CRM.morerecords": True,
+            "@Microsoft.Dynamics.CRM.fetchxmlpagingcookie": "<<<not valid xml>>>",
+        })
+        page2 = MagicMock()
+        page2.json = AsyncMock(return_value={
+            "value": [{"name": "Fabrikam", "accountid": "g2"}],
+            "@Microsoft.Dynamics.CRM.morerecords": False,
+        })
+        mock_od._request = AsyncMock(side_effect=[page1, page2])
+
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            result = await async_client.query.fetchxml(_SIMPLE_FETCHXML).execute()
+
+        assert len(result) == 2
+        assert any("paging cookie could not be parsed" in str(warning.message) for warning in w)
+
+    async def test_execute_multi_page_no_cookie_simple_paging(self, async_client, mock_od):
+        """execute() falls back to simple page-number paging when no cookie is returned."""
+        import warnings
+
+        mock_od._entity_set_from_schema_name = AsyncMock(return_value="accounts")
+
+        page1 = MagicMock()
+        page1.json = AsyncMock(return_value={
+            "value": [{"name": "Contoso", "accountid": "g1"}],
+            "@Microsoft.Dynamics.CRM.morerecords": True,
+            # No fetchxmlpagingcookie key
+        })
+        page2 = MagicMock()
+        page2.json = AsyncMock(return_value={
+            "value": [{"name": "Fabrikam", "accountid": "g2"}],
+            "@Microsoft.Dynamics.CRM.morerecords": False,
+        })
+        mock_od._request = AsyncMock(side_effect=[page1, page2])
+
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            result = await async_client.query.fetchxml(_SIMPLE_FETCHXML).execute()
+
+        assert len(result) == 2
+        assert any("simple paging" in str(warning.message) for warning in w)
+
+    async def test_execute_json_parse_error_yields_empty_page(self, async_client, mock_od):
+        """execute() yields an empty page when the response body cannot be parsed as JSON."""
+        mock_od._entity_set_from_schema_name = AsyncMock(return_value="accounts")
+
+        resp = MagicMock()
+        resp.json = AsyncMock(side_effect=Exception("invalid json"))
+        mock_od._request = AsyncMock(return_value=resp)
+
+        result = await async_client.query.fetchxml(_SIMPLE_FETCHXML).execute()
+        assert len(result) == 0
+
+    async def test_execute_raises_on_max_pages_exceeded(self, async_client, mock_od):
+        """execute() raises ValidationError when paging exceeds the maximum page limit."""
+        import urllib.parse
+        import warnings
+        from PowerPlatform.Dataverse.core.errors import ValidationError
+
+        mock_od._entity_set_from_schema_name = AsyncMock(return_value="accounts")
+
+        def _make_page_resp(page_num: int):
+            inner = f'<cookie page="{page_num}"><accountid last="x" first="x" /></cookie>'
+            encoded = urllib.parse.quote(urllib.parse.quote(inner))
+            cookie = f'<cookie pagenumber="{page_num + 1}" pagingcookie="{encoded}" istracking="false" />'
+            resp = MagicMock()
+            resp.json = AsyncMock(return_value={
+                "value": [{"name": f"Record{page_num}", "accountid": f"g{page_num}"}],
+                "@Microsoft.Dynamics.CRM.morerecords": True,
+                "@Microsoft.Dynamics.CRM.fetchxmlpagingcookie": cookie,
+            })
+            return resp
+
+        # Always return morerecords=True to trigger the limit
+        mock_od._request = AsyncMock(side_effect=lambda *a, **kw: _make_page_resp(1))
+
+        with warnings.catch_warnings(record=True):
+            warnings.simplefilter("always")
+            with pytest.raises(ValidationError, match="exceeded"):
+                await async_client.query.fetchxml(_SIMPLE_FETCHXML).execute()
 

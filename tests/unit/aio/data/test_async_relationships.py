@@ -3,7 +3,6 @@
 
 """Unit tests for _AsyncRelationshipOperationsMixin."""
 
-import json
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest

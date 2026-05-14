@@ -4,13 +4,12 @@
 import pytest
 import pandas as pd
 from contextlib import asynccontextmanager
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 from azure.core.credentials_async import AsyncTokenCredential
 
 from PowerPlatform.Dataverse.aio.async_client import AsyncDataverseClient
 from PowerPlatform.Dataverse.aio.operations.async_dataframe import AsyncDataFrameOperations
-from PowerPlatform.Dataverse.models.record import Record
 
 
 def _make_client_with_od(mock_od):

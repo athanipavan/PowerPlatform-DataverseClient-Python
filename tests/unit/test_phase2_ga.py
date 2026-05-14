@@ -18,7 +18,6 @@ from unittest.mock import MagicMock
 from azure.core.credentials import TokenCredential
 
 from PowerPlatform.Dataverse.models.record import QueryResult, Record
-from PowerPlatform.Dataverse.models.query_builder import QueryBuilder
 
 
 def _make_client():

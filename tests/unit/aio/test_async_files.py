@@ -1,7 +1,6 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
 
-import pytest
 
 from PowerPlatform.Dataverse.aio.operations.async_files import AsyncFileOperations
 

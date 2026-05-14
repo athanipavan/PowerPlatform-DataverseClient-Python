@@ -3,10 +3,8 @@
 
 import pytest
 import pandas as pd
-from contextlib import asynccontextmanager
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
-from azure.core.credentials_async import AsyncTokenCredential
 
 from PowerPlatform.Dataverse.aio.async_client import AsyncDataverseClient
 from PowerPlatform.Dataverse.aio.operations.async_batch import (
@@ -41,7 +39,6 @@ from PowerPlatform.Dataverse.data._batch_base import (
     _QuerySql,
     _ChangeSet,
 )
-from PowerPlatform.Dataverse.models.batch import BatchResult
 from PowerPlatform.Dataverse.models.upsert import UpsertItem
 from PowerPlatform.Dataverse.models.relationship import (
     LookupAttributeMetadata,

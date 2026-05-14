@@ -2,7 +2,6 @@
 # Licensed under the MIT license.
 
 import json
-import time
 import unittest
 from enum import Enum
 from unittest.mock import MagicMock, patch
@@ -2051,7 +2050,6 @@ class TestPicklistLabelResolution(unittest.TestCase):
 
     def test_bulk_fetch_populates_nested_cache(self):
         """Bulk fetch stores picklists in nested {table: {ts, picklists: {...}}} format."""
-        import time
 
         resp = self._bulk_response(
             ("industrycode", [(6, "Technology"), (12, "Consulting")]),
